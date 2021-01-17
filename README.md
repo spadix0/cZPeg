@@ -2,8 +2,9 @@
 
 *cZPeg* generates recursive descent parsers *at compile-time* in [Zig] using a
 functional API inspired by [LPeg] to declare and compose patterns.  There is
-also an `re` module (WiP) for generating parsers from more compact PEG-style
-pattern strings.
+also an `re` module for generating parsers from more compact PEG-style pattern
+strings.  The compiled parser can then be used to match strings at runtime or
+comptime!
 
 
 ### Install
@@ -29,11 +30,10 @@ Now you can import and use the package in your project:
 
 ```zig
 const std = @import("std");
-const czpeg = @import("czpeg");
+const re = @import("czpeg").re;
 test "greeting" {
-    const pat = czpeg.Pattern.pat;
-    const p = pat(.{ "Hello", pat(" ").rep(1, -1), pat(1).rep(1, -1).cap() });
-    std.testing.expectEqualStrings("world", p.matchLean("Hello world").?);
+    const pat = re.compile("'Hello' %s+ {%w+}'!'", .{});
+    std.testing.expectEqualStrings("world", p.matchLean("Hello world!").?);
 }
 ```
 

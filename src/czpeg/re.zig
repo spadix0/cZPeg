@@ -13,88 +13,86 @@ const P = czpeg.Pattern;
 // (although P does reuse `classes` table, which is on R...)
 const R = P;
 
-/// returns new type with field for each grammar rule and .0 for any
-/// top level pattern.
-pub fn compile(comptime re: []const u8, comptime args: anytype)
-    Preparse.GrammarType(re)
-{
+/// build parser by parsing PEG pattern or grammar.  returns toplevel pattern
+/// or first grammar rule.
+pub fn compile(comptime re: []const u8, comptime args: anytype) type {
     comptime const G = Preparse.GrammarType(re);
     comptime var g: G = undefined;
 
-    comptime const RE = struct {
+    const RE = struct {
         const pattern = exp._(-1);
 
-        pub const exp = spc._(.{ grammar, alt.grok(void, savePat) });
-        const expref = P.ref(@This(), "exp", type);
+        pub const exp = spc._(.{ grammar, alt });
+        const expref = P.ref(&@This(), "exp", anyerror!type);
 
-        fn savePat(comptime pat: type) void {
-            //g.@"0" = pat;
+        const grammar = rule.foldRep(0, -1, rule, {}, foldFirst);
+
+        fn foldFirst(comptime acc: *type, comptime rule: type) void { }
+
+        pub const rule = P.seq(.{ name.cap(), spc, "<-", expref })
+            .grok(type, saveRule);
+
+        fn saveRule(comptime spec: anytype) type {
+            @field(g, spec[0]) = spec[1];
+            return spec[1];
         }
 
-        const grammar = rule.rep(1, -1);
-        pub const rule = P.seq(.{ name, spc, "->", expref })
-            .grok(void, saveRule);
+        const alt = P.seq(.{ "/", spc, seq })
+            .foldRep(0, -1, seq, {}, foldAlt);
 
-        fn saveRule(comptime spec: std.meta.Tuple(&.{[]const u8, type})) void {
-            //@field(g, spec[0]) = spec[1];
+        fn foldAlt(comptime acc: *type, comptime pat: type) void {
+            acc.* = R.alt(.{ acc.*, pat });
         }
 
-        const alt = seq._(.{
-            .{ "/", spc, seq },
-            P.grok(type, genConst(R.pat(false)).gen, 0),
-        }).grok(type, R.alt);
+        const seq = pfx.foldRep(0, -1, genConst(R.pat(true)).gen, {}, foldCat);
 
-        const seq = comptime pfx.foldRep(0, -1, P.Folder {
-            .init = R.pat(true),
-            .fold = foldCat,
-        });
+        fn foldCat(comptime acc: *type, comptime pat: type) void {
+            acc.* = P.cat(acc.*, pat);
+        }
 
-        const pfxref = P.ref(@This(), "pfx", type);
+        const pfxref = P.ref(&@This(), "pfx", anyerror!type);
         pub const pfx = P.alt(.{
             .{ "&", spc, pfxref.grok(type, R.if_) },
             .{ "!", spc, pfxref.grok(type, R.not) },
             sfx,
         });
 
-        const sfx = struct {
-            pub fn parse(comptime p: *Parser) ?type {
-                const pat: type = pri.parse(p) orelse return null;
-                _ = spc.parse(p);
-                return P.seq(.{
-                    .{
-                        P.grok(type, genRep(1, -1).gen, "+"),
-                        P.grok(type, genRep(0, -1).gen, "*"),
-                        P.grok(type, genRep(0, 1).gen, "?"),
-                        P.grok(type, rep, .{
-                            "^", P.set("+-").cap().rep(0, 1), num
-                        }),
-                        //.{ "->", spc, name }, // FIXME TBD
-                    },
-                    spc
-                }).foldRep(0, -1, P.Folder {
-                    .init = pat,
-                    .fold = foldCat,
-                }).parse(p) catch unreachable;  // FIXME why error, where from?!
-            }
-        };
+        const sfx = P.seq(.{
+            .{
+                P.grok(type, genRep(1, -1).gen, "+"),
+                P.grok(type, genRep(0, -1).gen, "*"),
+                P.grok(type, genRep(0, 1).gen, "?"),
+                P.grok(type, rep, .{
+                    "^", P.set("+-").cap().rep(0, 1), num
+                }),
+                //.{ "=>", spc, name }, // FIXME TBD
+            },
+            spc
+        }).foldRep(0, -1, P.cat(pri, spc), {}, foldSfx);
 
-        fn foldCat(comptime acc: *type, comptime pat: type) void {
-            acc.* = P.cat(acc.*, pat);
+        fn foldSfx(comptime acc: *type, comptime composer: type) void {
+            acc.* = composer.compose(acc.*);
         }
 
         fn genRep(comptime nmin: comptime_int, comptime nmax: comptime_int) type {
             return struct {
-                fn gen(comptime r: type) type { return r.rep(nmin, nmax); }
+                fn gen() type {
+                    return struct {
+                        fn compose(comptime pre: type) type {
+                            return pre.rep(nmin, nmax);
+                        }
+                    };
+                }
             };
         }
 
         fn rep(comptime spec: anytype) type {
             return if (spec[0] == null)
-                genRep(spec[1], spec[1]).gen
-            else if (spec[0][0] == '+')
-                genRep(spec[1], -1).gen
+                genRep(spec[1], spec[1]).gen()
+            else if (spec[0].?[0] == '+')
+                genRep(spec[1], -1).gen()
             else
-                genRep(0, spec[1]).gen;
+                genRep(0, spec[1]).gen();
         }
 
         const pri = P.alt(.{
@@ -105,7 +103,7 @@ pub fn compile(comptime re: []const u8, comptime args: anytype)
             P.grok(type, R.pos, "{}"),
             .{ "{", expref.grok(type, R.cap), "}" },
             P.grok(type, genConst(R.any(1)).gen, "."),
-            //P.grok(type, refRule, name._(P.not(.{ spc, "<-" }))),
+            P.grok(type, refRule, name._(P.not(.{ spc, "<-" })).cap()),
         });
 
         fn genConst(comptime pat: type) type {
@@ -114,15 +112,22 @@ pub fn compile(comptime re: []const u8, comptime args: anytype)
             };
         }
 
-        //fn refRule(comptime spec: anytype) type {
-        //    return R.ref(g, spec);
-        //}
+        fn refRule(comptime nm: []const u8) type {
+            if (!@hasField(@TypeOf(g), nm))
+                @compileError("undefined reference to rule " ++ nm);
+            return @field(g, nm); // R.ref(&g, nm, anyerror!type);
+        }
     };
 
-    comptime const m = RE.pattern.matchLean(re);
+    comptime const merr = RE.pattern.matchLean(re);
+    comptime const m =
+        if (comptime (@typeInfo(@TypeOf(merr)) != .ErrorUnion)) merr
+        else if (merr) |v| v
+        else |e| @compileError(
+            "error " ++ @errorName(e) ++ " while parsing pattern: '" ++ re ++ "'");
     if (comptime (m == null))
-        @compileError("invalid pattern: '" ++ re ++ "'");
-    return g;
+        @compileError("invalid pattern: \"" ++ re ++ "\"");
+    return m.?;
 }
 
 
@@ -130,53 +135,35 @@ const Preparse = struct {
     const first_rule = P.seq(.{ spc, name.cap(), spc, "<-" });
 
     const findRule = struct {
-        pub fn parse(comptime p: *Parser) ?[]const u8 {
-            @setEvalBranchQuota(1<<16);
-            inline while (true) {
-                _ = comptime P.charset(~id0set).rep(0, -1).parse(p);
-                comptime if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
+        pub fn parse(p: *Parser) ?[]const u8 {
+            while (true) {
+                _ = P.charset(~id0set).rep(0, -1).parse(p);
+                if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
                     return r;
-                comptime if (P.charset(id0set).rep(1, -1).parse(p) == null)
+                if (P.charset(id0set).rep(1, -1).parse(p) == null)
                     return null;
             }
         }
     };
 
-    fn foldCount(comptime acc: *usize, comptime c: []const u8) void {
+    fn foldCount(acc: *usize, c: []const u8) void {
         acc.* += 1;
     }
-    const count_rules = P.foldRep(0, -1, findRule, P.Folder {
-        .init = 0,
-        .fold = foldCount,
-    });
+    const count_rules = P.foldRep(0, -1, findRule, 0, {}, foldCount);
 
     /// generate struct type to hold named productions
-    fn GrammarType(comptime re: []const u8) type {
-        comptime const ispat = comptime (first_rule.matchLean(re) == null);
-        comptime var n = if (comptime ispat) 1 else 0;
-        n += comptime count_rules.matchLean(re).?;
-        comptime var fields: [n]TypeInfo.StructField = undefined;
-
-        comptime var i = 0;
-        if (comptime ispat) {
-            fields[i] = .{
-                .name = "0",
-                .field_type = type,
-                .default_value = @as(?type, null),
-                .is_comptime = false,
-                .alignment = 0,
-            };
-            i += 1;
-        }
-
-        comptime var p = Parser.init(re, &noalloc);
+    fn GrammarType(re: []const u8) type {
+        const n = count_rules.matchLean(re).?;
+        var fields: [n]TypeInfo.StructField = undefined;
+        var i = 0;
+        var p = Parser.init(re, &noalloc);
         @setEvalBranchQuota(1<<16);
-        inline while (comptime findRule.parse(&p)) |r| {
+        while (findRule.parse(&p)) |r| {
             fields[i] = .{
                 .name = r,
                 .field_type = type,
                 .default_value = @as(?type, null),
-                .is_comptime = true,
+                .is_comptime = false,
                 .alignment = 0,
             };
             i += 1;
@@ -214,15 +201,14 @@ fn genCls(comptime s: anytype) ?type {
 
 /// fold character classes without allocating captures
 const mergeItems = struct {
-    pub fn parse(comptime p: *Parser) ?type {
-        comptime const c0 = item.parse(p);
-        if (comptime (c0 == null))
+    pub fn parse(p: *Parser) ?type {
+        const c0 = item.parse(p);
+        if (c0 == null)
             @compileError("unexpected end of pattern in class");
 
         comptime var cs: u256 = c0.?.chars;
 
-        @setEvalBranchQuota(1<<16);
-        inline while (true) {
+        while (true) {
             if (p.get(1)) |s| {
                 if (s[0] == ']')
                     break;
@@ -262,14 +248,15 @@ fn getDef(comptime s: []const u8) type {
 }
 
 const str = P.alt(.{
-    .{ "'", P.not("'")._(1).rep(0, -1).cap(), "'"},
-    .{ "\"", P.not("\"")._(1).rep(0, -1).cap(), "\""},
+    .{ "'", P.not("'")._(1).rep(0, -1).cap(), "'" },
+    .{ "\"", P.not("\"")._(1).rep(0, -1).cap(), "\"" },
 });
 
-const num = classes.d.rep(1, -1).grok(error{Overflow,InvalidCharacter}!u32, parseU32Dec);
+const ParseError = error{Overflow,InvalidCharacter};
+const num = classes.d.rep(1, -1).grok(ParseError!u32, parseU32Dec);
 
-fn parseU32Dec(comptime s: []const u8) !u32 {
-    return comptime std.fmt.parseInt(u32, s, 10);
+fn parseU32Dec(s: []const u8) !u32 {
+    return try std.fmt.parseInt(u32, s, 10);
 }
 
 fn spanset(comptime lo: u8, comptime hi: u8) u256 {
@@ -337,12 +324,12 @@ var noalloc = Allocator {
     .resizeFn = noResize,
 };
 
-fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) ![]u8 {
+fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) Allocator.Error![]u8 {
     std.debug.panic("Parser attempted to alloc during compile", .{});
 }
 
-fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) !usize {
-    std.debug.panic("Parser attempted to (re)alloc during compile", .{});
+fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) Allocator.Error!usize {
+    unreachable;
 }
 
 
@@ -521,22 +508,174 @@ test "Preparse.count_rules" {
 test "Preparse.GrammarType" {
     const G = struct {
         fn chkRules(comptime s: []const u8, comptime exp: anytype) void {
-            const Rules = Preparse.GrammarType(s);
-            const fields = @typeInfo(Rules).Struct.fields;
+            comptime const Rules = Preparse.GrammarType(s);
+            comptime const fields = @typeInfo(Rules).Struct.fields;
             expectEqual(exp.len, fields.len);
             inline for (exp) |nm, i|
                 expectEqual(@as([]const u8, nm), fields[i].name);
         }
     };
-    G.chkRules("", .{ "0" });
+    G.chkRules("", .{});
     G.chkRules("a <- ...", .{ "a" });
-    G.chkRules("meh {(x <- ...) y<-foo z<-bar}", .{ "0", "x", "y", "z" });
+    G.chkRules("meh {(x <- ...) y<-foo z<-bar}", .{ "x", "y", "z" });
+}
+
+test "compile str" {
+    const p = compile("'a'", .{});
+    expect(@TypeOf(p) == type);
+    chkNoM(p, "b");
+    chkMatch(p, "aa", 1);
+}
+
+test "compile cls" {
+    const p = compile(" [ac] ", .{});
+    expect(@TypeOf(p) == type);
+    chkNoM(p, "b");
+    chkMatch(p, "a", 1);
+}
+
+test "compile def" {
+    const p = compile("%d", .{});
+    expect(@TypeOf(p) == type);
+    chkNoM(p, "c");
+    chkMatch(p, "4", 1);
+}
+
+test "compile any(1)" {
+    const p = compile(".", .{});
+    expect(@TypeOf(p) == type);
+    chkNoM(p, "");
+    chkMatch(p, "ab", 1);
+}
+
+test "group" {
+    const p = compile("((%a()))", .{});
+    expect(@TypeOf(p) == type);
+    chkNoM(p, "0");
+    chkMatch(p, "za", 1);
+}
+
+test "rep +" {
+    comptime const p = compile("'a'+", .{});
+    chkNoM(p, "");
+    chkNoM(p, "b");
+    chkMatch(p, "a", 1);
+    chkMatch(p, "aaa", 3);
+    chkMatch(p, "aaba", 2);
+}
+
+test "rep *" {
+    comptime const p = compile("'a' *", .{});
+    chkMatch(p, "", 0);
+    chkMatch(p, "b", 0);
+    chkMatch(p, "a", 1);
+    chkMatch(p, "aaa", 3);
+    chkMatch(p, "aaba", 2);
+}
+
+test "rep ?" {
+    comptime const p = compile("'a'?", .{});
+    chkMatch(p, "", 0);
+    chkMatch(p, "b", 0);
+    chkMatch(p, "a", 1);
+    chkMatch(p, "aaa", 1);
+}
+
+test "rep n" {
+    comptime const p = compile("'a'^3", .{});
+    chkNoM(p, "");
+    chkNoM(p, "aa");
+    chkNoM(p, "aba");
+    chkMatch(p, "aaa", 3);
+    chkMatch(p, "aaaa", 3);
+}
+
+test "rep +n" {
+    comptime const p = compile("'a'^+3", .{});
+    chkNoM(p, "");
+    chkNoM(p, "aa");
+    chkNoM(p, "aba");
+    chkMatch(p, "aaa", 3);
+    chkMatch(p, "aaaa", 4);
+    chkMatch(p, "aaaba", 3);
+}
+
+test "rep -n" {
+    comptime const p = compile("'a'^-3", .{});
+    chkMatch(p, "", 0);
+    chkMatch(p, "b", 0);
+    chkMatch(p, "a", 1);
+    chkMatch(p, "aa", 2);
+    chkMatch(p, "aaa", 3);
+    chkMatch(p, "aaaa", 3);
+    chkMatch(p, "ababa", 1);
+}
+
+test "capture pos" {
+    {
+        const p = compile("{}", .{});
+        expect(@TypeOf(p) == type);
+        expectEqual(@as(usize, 0), chkCap(p, " ", 0));
+    }
+    {
+        const p = compile("'a'+ {} 'b'*", .{});
+        expect(@TypeOf(p) == type);
+        chkNoM(p, "");
+        chkNoM(p, "b");
+        expectEqual(@as(usize, 1), chkCap(p, "a", 1));
+        expectEqual(@as(usize, 2), chkCap(p, "aab", 3));
+    }
+}
+
+test "capture raw" {
+    const p = compile("'Hello' %s+ {%w+}'!'", .{});
+    chkNoM(p, "Hello yomama");
+    expectStr("world", chkCap(p, "Hello world!", 12));
+}
+
+test "pfx" {
+    {
+        const p = compile("&'a'", .{});
+        chkNoM(p, "ba");
+        chkMatch(p, "aa", 0);
+    }
+    {
+        const p = compile("! 'a'", .{});
+        chkNoM(p, "aa");
+        chkMatch(p, "ba", 0);
+    }
+}
+
+test "seq" {
+    const p = compile("'a'+ 'b'+ 'c'*", .{});
+    chkNoM(p, "");
+    chkNoM(p, "a");
+    chkNoM(p, "ba");
+    chkMatch(p, "ab", 2);
+    chkMatch(p, "abc", 3);
+    chkMatch(p, "abcccd", 5);
+    chkMatch(p, "aaaabb", 6);
+}
+
+test "alt" {
+    const p = compile("'a' / 'ab' / 'ba'", .{});
+    chkNoM(p, "");
+    chkMatch(p, "aaa", 1);
+    chkMatch(p, "aba", 1); // NB 'a' matches first!
+    chkMatch(p, "baa", 2);
+}
+
+test "rule" {
+    const p = compile("(ab <- 'a'+ 'b'+) ab", .{});
+    chkNoM(p, "");
+    chkNoM(p, "ab");
+    chkMatch(p, "abab", 4);
 }
 
 // re grammar
 // edited from http://www.inf.puc-rio.br/~roberto/lpeg/re.html
 //  * remove old-style "<name>" non-terminals
-//  * remove substitution, table, fold, string, number and match-time captures
+//  * remove substitution, table, fold, string, number and -> captures
 //  * remove named and anonymous group captures
 //  * remove back-references
 //  * change comments to use "//" for consistency w/zig
@@ -555,7 +694,7 @@ const test_grammar =
   \\		 / suffix
   \\ suffix	<- primary S (([+*?]
   \\		     / '^' [+-]? num
-  \\		     / '->' S name) S)*
+  \\		     / '=>' S name) S)*
   \\
   \\ primary	<- '(' exp ')'
   \\		 / string

@@ -165,7 +165,7 @@ pub const Pattern = struct {
     /// rule reference cycles.  return type cannot be introspected (without
     /// reintroducing cycle), so must be provided.
     pub fn ref(
-        comptime scope: *const type,
+        comptime scope: anytype,
         comptime name: []const u8,
         comptime R: type,
     ) type {
@@ -254,33 +254,48 @@ pub const Pattern = struct {
         comptime nmin: comptime_int,
         comptime nmax: comptime_int,
         comptime pattern: anytype,
-        comptime folder: Folder,
+        comptime init: anytype,
+        comptime deinitFn: anytype,
+        comptime foldFn: anytype,
     ) type {
         comptime const P = pat(pattern);
-        comptime const init_info = @typeInfo(@TypeOf(folder.init));
-        comptime const deinit_info = @typeInfo(@TypeOf(folder.deinit));
-        comptime const fold_info = @typeInfo(@TypeOf(folder.fold)).Fn;
+        comptime const init_info = @typeInfo(@TypeOf(init));
+        comptime const deinit_info = @typeInfo(@TypeOf(deinitFn));
+        comptime const fold_info = @typeInfo(@TypeOf(foldFn)).Fn;
         comptime const acc_info = @typeInfo(fold_info.args[0].arg_type.?);
         comptime const A = acc_info.Pointer.child;
         comptime const T = StripError(A);
         comptime var E = MatchError(P);
         // FIXME more unresolved return type hacks
-        E = E || ErrorOf(fold_info.return_type.?);
-        if (init_info == .Fn)
+        E = E || ErrorOf(fold_info.return_type orelse void);
+        if (init_info == .Fn) {
             E = E || ErrorOf(init_info.Fn.return_type.?);
+        } else if (init_info == .Type)
+            E = E || MatchError(init);
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
             pub fn parse(p: *Parser) MatchReturn(E, T) {
                 const saved = p.save();
-                const aerr =
-                    if (comptime (init_info == .Fn)) folder.init(p)
-                    else folder.init;
-                var acc: T = if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
+                var acc: T = switch (comptime init_info) {
+                    .Fn => |f| blk:{
+                        var aerr = if (comptime(f.args.len == 0)) init() else init(p);
+                        break :blk if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
+                    },
+                    .Type => blk: {
+                        var aerr = init.parse(p);
+                        var aopt = if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
+                        if (aopt) |a| {
+                            break :blk a;
+                        } else
+                            return null;
+                    },
+                    else => init,
+                };
                 errdefer
                     if (comptime(deinit_info != .Fn)) {}
-                    else folder.deinit(p, &acc);
+                    else deinitFn(p, &acc);
 
                 var m: usize = 0;
                 while (comptime (nmax < 0) or m < nmax) {
@@ -288,7 +303,7 @@ pub const Pattern = struct {
                     const opt =
                         if (comptime canError(@TypeOf(perr))) try perr else perr;
                     if (opt) |c| {
-                        const ferr = folder.fold(&acc, c);
+                        const ferr = foldFn(&acc, c);
                         if (comptime canError(@TypeOf(ferr))) try ferr;
                     } else
                         break;
@@ -297,7 +312,7 @@ pub const Pattern = struct {
 
                 if (m < nmin) {
                     if (comptime (deinit_info == .Fn))
-                        folder.deinit(p, &acc);
+                        deinitFn(p, &acc);
                     p.restore(saved);
                     return null;
                 }
@@ -356,12 +371,14 @@ pub const Pattern = struct {
         comptime const M = MatchType(P);
 
         if (comptime (M == void))
-            return foldRep(nmin, nmax, P, .{ .fold = foldVoid });
+            return foldRep(nmin, nmax, P, {}, {}, foldVoid);
 
-        return if (comptime (nmin < nmax and nmax == 1))
-            foldRep(nmin, nmax, P, optionFolder(M))
-        else
-            foldRep(nmin, nmax, P, arrayFolder(M));
+        if (comptime (nmin < nmax and nmax == 1)) {
+            return foldRep(nmin, nmax, P, @as(?M, null), {}, optionFolder(M).fold);
+        } else {
+            const fns = arrayFolder(M);
+            return foldRep(nmin, nmax, P, fns.init, fns.deinit, fns.fold);
+        }
     }
 
     /// match concatenation of 2 patterns (special case of .seq() with 2 args).
@@ -613,9 +630,11 @@ fn PatternBuilder(comptime Self_: type) type {
         pub fn foldRep(
             comptime nmin: comptime_int,
             comptime nmax: comptime_int,
-            comptime folder: P.Folder
+            comptime init: anytype,
+            comptime deinitFn: anytype,
+            comptime foldFn: anytype,
         ) type {
-            return P.foldRep(nmin, nmax, Self, folder);
+            return P.foldRep(nmin, nmax, Self, init, deinitFn, foldFn);
         }
 
         /// match this pattern repeatedly.
@@ -723,7 +742,7 @@ fn isError(comptime Error: type) bool {
         .ErrorSet => |errset|
             if (errset) |errs|
                 errs.len > 0
-            else false,
+            else true,
         else => false
     };
 }
@@ -1287,7 +1306,7 @@ test "non-blind greedy" {
             .{ 1, lastdigRef },
             span('0', '9')
         });
-        const lastdigRef = ref(@This(), "lastdig", void);
+        const lastdigRef = ref(&@This(), "lastdig", void);
     };
 
     chkNoM(G.lastdig, "abcxyz");
@@ -1300,7 +1319,7 @@ test "non-blind non-greedy c comment grammar" {
 
         const comment = cat("/*", close);
         const close = alt(.{ "*/", .{ 1, closeRef }, });
-        const closeRef = ref(@This(), "close", void);
+        const closeRef = ref(&@This(), "close", void);
     };
 
     chkNoM(G.comment, "");
@@ -1365,8 +1384,8 @@ test "even 0s even 1s" {
         // OO <- ’0’ EO / ’1’ OE
 
         // add enough manual refs to break cycles
-        const eeRef = ref(@This(), "ee", void);
-        const ooRef = ref(@This(), "oo", void);
+        const eeRef = ref(&@This(), "ee", void);
+        const ooRef = ref(&@This(), "oo", void);
 
         const ee = alt(.{ .{ "0", oe }, .{ "1", eo }, -1 });
         const oe = alt(.{ .{ "0", eeRef }, .{ "1", ooRef } });
