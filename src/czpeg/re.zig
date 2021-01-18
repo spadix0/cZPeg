@@ -25,7 +25,10 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         pub const exp = spc._(.{ grammar, alt });
         const expref = P.ref(&@This(), "exp", anyerror!type);
 
-        const grammar = rule.foldRep(0, -1, rule, {}, foldFirst);
+        const grammar = rule.foldRep(0, -1, .{
+            .init = rule,
+            .fold = foldFirst,
+        });
 
         fn foldFirst(comptime acc: *type, comptime rule: type) void { }
 
@@ -38,13 +41,19 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         }
 
         const alt = P.seq(.{ "/", spc, seq })
-            .foldRep(0, -1, seq, {}, foldAlt);
+            .foldRep(0, -1, .{
+                .init = seq,
+                .fold = foldAlt,
+        });
 
         fn foldAlt(comptime acc: *type, comptime pat: type) void {
             acc.* = R.alt(.{ acc.*, pat });
         }
 
-        const seq = pfx.foldRep(0, -1, genConst(R.pat(true)).gen, {}, foldCat);
+        const seq = pfx.foldRep(0, -1, .{
+            .init = genConst(R.pat(true)).gen,
+            .fold = foldCat,
+        });
 
         fn foldCat(comptime acc: *type, comptime pat: type) void {
             acc.* = P.cat(acc.*, pat);
@@ -68,7 +77,10 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
                 //.{ "=>", spc, name }, // FIXME TBD
             },
             spc
-        }).foldRep(0, -1, P.cat(pri, spc), {}, foldSfx);
+        }).foldRep(0, -1, .{
+            .init = P.cat(pri, spc),
+            .fold = foldSfx,
+        });
 
         fn foldSfx(comptime acc: *type, comptime composer: type) void {
             acc.* = composer.compose(acc.*);
@@ -149,7 +161,10 @@ const Preparse = struct {
     fn foldCount(acc: *usize, c: []const u8) void {
         acc.* += 1;
     }
-    const count_rules = P.foldRep(0, -1, findRule, 0, {}, foldCount);
+    const count_rules = P.foldRep(0, -1, findRule, .{
+        .init = 0,
+        .fold = foldCount,
+    });
 
     /// generate struct type to hold named productions
     fn GrammarType(re: []const u8) type {

@@ -254,14 +254,12 @@ pub const Pattern = struct {
         comptime nmin: comptime_int,
         comptime nmax: comptime_int,
         comptime pattern: anytype,
-        comptime init: anytype,
-        comptime deinitFn: anytype,
-        comptime foldFn: anytype,
+        comptime folder: Folder,
     ) type {
         comptime const P = pat(pattern);
-        comptime const init_info = @typeInfo(@TypeOf(init));
-        comptime const deinit_info = @typeInfo(@TypeOf(deinitFn));
-        comptime const fold_info = @typeInfo(@TypeOf(foldFn)).Fn;
+        comptime const init_info = @typeInfo(@TypeOf(folder.init));
+        comptime const deinit_info = @typeInfo(@TypeOf(folder.deinit));
+        comptime const fold_info = @typeInfo(@TypeOf(folder.fold)).Fn;
         comptime const acc_info = @typeInfo(fold_info.args[0].arg_type.?);
         comptime const A = acc_info.Pointer.child;
         comptime const T = StripError(A);
@@ -271,7 +269,7 @@ pub const Pattern = struct {
         if (init_info == .Fn) {
             E = E || ErrorOf(init_info.Fn.return_type.?);
         } else if (init_info == .Type)
-            E = E || MatchError(init);
+            E = E || MatchError(folder.init);
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
@@ -280,22 +278,22 @@ pub const Pattern = struct {
                 const saved = p.save();
                 var acc: T = switch (comptime init_info) {
                     .Fn => |f| blk:{
-                        var aerr = if (comptime(f.args.len == 0)) init() else init(p);
+                        var aerr = if (comptime(f.args.len == 0)) folder.init() else folder.init(p);
                         break :blk if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
                     },
                     .Type => blk: {
-                        var aerr = init.parse(p);
+                        var aerr = folder.init.parse(p);
                         var aopt = if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
                         if (aopt) |a| {
                             break :blk a;
                         } else
                             return null;
                     },
-                    else => init,
+                    else => folder.init,
                 };
                 errdefer
                     if (comptime(deinit_info != .Fn)) {}
-                    else deinitFn(p, &acc);
+                    else folder.deinit(p, &acc);
 
                 var m: usize = 0;
                 while (comptime (nmax < 0) or m < nmax) {
@@ -303,7 +301,7 @@ pub const Pattern = struct {
                     const opt =
                         if (comptime canError(@TypeOf(perr))) try perr else perr;
                     if (opt) |c| {
-                        const ferr = foldFn(&acc, c);
+                        const ferr = folder.fold(&acc, c);
                         if (comptime canError(@TypeOf(ferr))) try ferr;
                     } else
                         break;
@@ -312,7 +310,7 @@ pub const Pattern = struct {
 
                 if (m < nmin) {
                     if (comptime (deinit_info == .Fn))
-                        deinitFn(p, &acc);
+                        folder.deinit(p, &acc);
                     p.restore(saved);
                     return null;
                 }
@@ -371,14 +369,12 @@ pub const Pattern = struct {
         comptime const M = MatchType(P);
 
         if (comptime (M == void))
-            return foldRep(nmin, nmax, P, {}, {}, foldVoid);
+            return foldRep(nmin, nmax, P, .{ .fold = foldVoid });
 
         if (comptime (nmin < nmax and nmax == 1)) {
-            return foldRep(nmin, nmax, P, @as(?M, null), {}, optionFolder(M).fold);
-        } else {
-            const fns = arrayFolder(M);
-            return foldRep(nmin, nmax, P, fns.init, fns.deinit, fns.fold);
-        }
+            return foldRep(nmin, nmax, P, optionFolder(M));
+        } else
+            return foldRep(nmin, nmax, P, arrayFolder(M));
     }
 
     /// match concatenation of 2 patterns (special case of .seq() with 2 args).
@@ -630,11 +626,9 @@ fn PatternBuilder(comptime Self_: type) type {
         pub fn foldRep(
             comptime nmin: comptime_int,
             comptime nmax: comptime_int,
-            comptime init: anytype,
-            comptime deinitFn: anytype,
-            comptime foldFn: anytype,
+            comptime folder: P.Folder,
         ) type {
-            return P.foldRep(nmin, nmax, Self, init, deinitFn, foldFn);
+            return P.foldRep(nmin, nmax, Self, folder);
         }
 
         /// match this pattern repeatedly.
