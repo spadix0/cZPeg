@@ -64,6 +64,12 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
+            pub usingnamespace if (pattern.len != 1) struct {} else struct {
+                pub fn toCharset() type {
+                    return charset(@as(u256, 1) << pattern[0]);
+                }
+            };
+
             pub fn parse(p: *Parser) ?void {
                 if (p.get(pattern.len)) |s| {
                     if (std.mem.eql(u8, s, pattern)) {
@@ -97,6 +103,18 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
+            pub fn toCharset() type {
+                comptime var cs: u256 = 0;
+                comptime var c = 0;
+
+                @setEvalBranchQuota(1<<16);
+                inline while (c < 256) : (c += 1) {
+                    if (comptime f(c))
+                        cs |= 1 << c;
+                }
+                return charset(cs);
+            }
+
             pub fn parse(p: *Parser) ?void {
                 if (p.get(1)) |s| {
                     if (f(s[0])) {
@@ -114,6 +132,14 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
             pub const chars = chars_;
+
+            pub fn toCharset() type {
+                return @This();
+            }
+
+            pub fn inv() type {
+                return charset(~chars);
+            }
 
             pub fn parse(p: *Parser) ?void {
                 if (p.get(1)) |s| {
@@ -146,6 +172,15 @@ pub const Pattern = struct {
     pub fn span(comptime lo: u8, comptime hi: u8) type {
         return struct {
             pub usingnamespace PatternBuilder(@This());
+
+            pub fn toCharset() type {
+                comptime var cs: u256 = 0;
+                comptime var c = lo;
+                @setEvalBranchQuota(1<<16);
+                inline while (c <= hi) : (c += 1)
+                        cs |= 1 << c;
+                return charset(cs);
+            }
 
             pub fn parse(p: *Parser) ?void {
                 if (p.get(1)) |s| {
@@ -473,12 +508,14 @@ pub const Pattern = struct {
 
         comptime var Pats: [args.len]type = undefined;
         Pats[0] = pat(args[0]);
+        comptime var is_charset = @hasDecl(Pats[0], "toCharset");
         comptime var E = MatchError(Pats[0]);
         comptime const T = MatchType(Pats[0]);
 
         inline for (args) |arg, i| {
             if (i > 0) {
                 Pats[i] = pat(arg);
+                is_charset = is_charset and @hasDecl(Pats[i], "toCharset");
                 E = E || MatchError(Pats[i]);
                 if(MatchType(Pats[i]) != T) {
                     @compileLog(0, T);
@@ -488,6 +525,14 @@ pub const Pattern = struct {
                             " (try capturing each choice to an enum)");
                 }
             }
+        }
+
+        // optimize case of merged character sets (or patterns that can be)
+        if (comptime is_charset) {
+            comptime var cs: u256 = 0;
+            inline for (Pats) |P|
+                cs |= P.toCharset().chars;
+            return charset(cs);
         }
 
         return struct {
@@ -940,6 +985,14 @@ test "Pattern.str" {
 
     chkMatch(str("a"), "a", 1);
     chkMatch(str("ab"), "abc", 2);
+
+    testing.expect(!@hasDecl(str(""), "toCharset"));
+    testing.expect(!@hasDecl(str("aa"), "toCharset"));
+
+    const cs = str("a").toCharset();
+    chkNoM(cs, "");
+    chkNoM(cs, "b");
+    chkMatch(cs, "ab", 1);
 }
 
 test "Pattern.any" {
@@ -970,17 +1023,26 @@ test "Pattern.set" {
     chkMatch(vowel, "ignore", 1);
     chkMatch(vowel, "oauie", 1);
     chkMatch(vowel, "under", 1);
+
+    expectEqual(vowel, vowel.toCharset());
 }
 
 test "Pattern.cls" {
-    const cls = Pattern.cls;
-
     const G = struct {
         fn even(c: u8) bool { return c&1 == 0; }
     };
+    const p = Pattern.cls(G.even);
+    const cs = p.toCharset();
 
-    chkNoM(cls(G.even).rep(1, -1), "\x01\x03\x05\x09\x11\x21\x41\x81\xff");
-    chkMatch(cls(G.even).rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
+    var i: u8 = 1;
+    while (true) {
+        chkNoM(p, &.{i});
+        chkNoM(cs, &.{i});
+        if (i >= 255) break;
+        i += 2;
+    }
+    chkMatch(p.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
+    chkMatch(cs.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
 }
 
 test "Pattern.span" {
@@ -990,6 +1052,10 @@ test "Pattern.span" {
     chkMatch(dig, "0abc", 1);
     chkMatch(dig, "9876", 1);
     chkMatch(dig, "42", 1);
+
+    const cs = dig.toCharset();
+    chkNoM(cs, "fail");
+    chkMatch(cs, "77", 1);
 }
 
 test "Pattern.not" {
@@ -1224,6 +1290,17 @@ test "Pattern.alt" {
         chkMatch(p, "abcxyz", 3);
         chkMatch(p, "abcabc", 3);
     }
+}
+
+test "alt charsets" {
+    const P = Pattern;
+    const p = P.alt(.{ "a", P.set("bc"), P.span('1', '3')});
+    testing.expect(@hasDecl(p, "toCharset"));
+    chkNoM(p, "");
+    chkNoM(p, "d");
+    chkNoM(p, "0");
+    chkNoM(p, "4");
+    chkMatch(p.rep(0, -1), "abc123", 6);
 }
 
 test "Pattern.pos" {

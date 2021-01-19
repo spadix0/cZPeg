@@ -40,10 +40,6 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         const alt = P.seq(.{ "/", spc, seq })
             .foldRep(0, -1, seq, {}, foldAlt);
 
-        fn foldAlt(comptime acc: *type, comptime pat: type) void {
-            acc.* = R.alt(.{ acc.*, pat });
-        }
-
         const seq = pfx.foldRep(0, -1, genConst(R.pat(true)).gen, {}, foldCat);
 
         fn foldCat(comptime acc: *type, comptime pat: type) void {
@@ -137,10 +133,10 @@ const Preparse = struct {
     const findRule = struct {
         pub fn parse(p: *Parser) ?[]const u8 {
             while (true) {
-                _ = P.charset(~id0set).rep(0, -1).parse(p);
+                _ = word0.toCharset().inv().rep(0, -1).parse(p);
                 if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
                     return r;
-                if (P.charset(id0set).rep(1, -1).parse(p) == null)
+                if (word0.rep(1, -1).parse(p) == null)
                     return null;
             }
         }
@@ -186,43 +182,22 @@ const spc = P.alt(.{
     .{ "//", P.charset(~(@as(u256, 1) << '\n')).rep(0, -1) },
 }).rep(0, -1);
 
-const name = P.charset(id0set)._(classes.w.rep(0, -1));
+const name = word0._(word.rep(0, -1));
 
 const cls = P.seq(.{
     "[",
     P.rep(0, 1, P.cap("^")),
-    mergeItems,
+    P.not("]")._(item).foldRep(0, -1, item, {}, foldAlt),
     "]"
 }).grok(type, genCls);
 
 fn genCls(comptime s: anytype) ?type {
-    return if (s[0] == null) s[1] else R.charset(~s[1].chars);
+    return if (s[0] == null) s[1] else s[1].toCharset().inv();
 }
 
-/// fold character classes without allocating captures
-const mergeItems = struct {
-    pub fn parse(p: *Parser) ?type {
-        const c0 = item.parse(p);
-        if (c0 == null)
-            @compileError("unexpected end of pattern in class");
-
-        comptime var cs: u256 = c0.?.chars;
-
-        while (true) {
-            if (p.get(1)) |s| {
-                if (s[0] == ']')
-                    break;
-                if (comptime item.parse(p)) |c| {
-                    cs |= c.chars;
-                    continue;
-                }
-            }
-            @compileError("unexpected end of pattern in class");
-        }
-
-        return R.charset(cs);
-    }
-};
+fn foldAlt(comptime acc: *type, comptime pat: type) void {
+    acc.* = R.alt(.{ acc.*, pat });
+}
 
 const item = P.alt(.{ def, range, P.grok(type, genChar, 1) });
 
@@ -237,7 +212,7 @@ const range = P.seq(.{
 }).grok(type, genRange);
 
 fn genRange(comptime s: anytype) type {
-    return R.charset(spanset(s[0][0], s[1][0]));
+    return R.span(s[0][0], s[1][0]);
 }
 
 
@@ -259,62 +234,37 @@ fn parseU32Dec(s: []const u8) !u32 {
     return try std.fmt.parseInt(u32, s, 10);
 }
 
-fn spanset(comptime lo: u8, comptime hi: u8) u256 {
-    comptime var cs: u256 = 0;
-    comptime var c = lo;
-    while (c <= hi) : (c += 1)
-        cs |= 1 << c;
-    return cs;
-}
+// use "word" definition consistent w/PCRE and LPeg (includes '_')
+// vs isalnum/ascii.AlNum (no '_')
+const word0 = R.alt(.{ "_", R.span('A', 'Z'), R.span('a', 'z') });
+const word = R.alt(.{ word0, R.span('0', '9') });
 
-fn ascset(comptime f: fn(u8) bool) u256 {
-    comptime var cs: u256 = 0;
-    comptime var c = 0;
-
-    @setEvalBranchQuota(1<<16);
-    inline while (c < 256) : (c += 1) {
-        if (comptime f(c))
-            cs |= 1 << c;
-    }
-    return cs;
-}
-
-const id0set = spanset('A', 'Z') | 1<<'_' | spanset('a', 'z');
-const wordset = id0set | spanset('0', '9');
-
-fn mkdefP(comptime f: fn(u8) bool) type {
-    return comptime R.charset(ascset(f));
-}
-
-fn mkdefN(comptime f: fn(u8) bool) type {
-    return comptime R.charset(~ascset(f));
+fn invCls(comptime f: fn(u8)bool) type {
+    return R.cls(asc.isAlpha).toCharset().inv();
 }
 
 const classes = .{
-    .a = mkdefP(asc.isAlpha),
-    .c = mkdefP(asc.isCntrl),
-    .d = mkdefP(asc.isDigit),
-    .g = mkdefP(asc.isGraph),
-    .l = mkdefP(asc.isLower),
-    .p = mkdefP(asc.isPunct),
-    .s = mkdefP(asc.isSpace),
-    .u = mkdefP(asc.isUpper),
-    .x = mkdefP(asc.isXDigit),
+    .a = R.cls(asc.isAlpha),
+    .c = R.cls(asc.isCntrl),
+    .d = R.cls(asc.isDigit),
+    .g = R.cls(asc.isGraph),
+    .l = R.cls(asc.isLower),
+    .p = R.cls(asc.isPunct),
+    .s = R.cls(asc.isSpace),
+    .u = R.cls(asc.isUpper),
+    .w = word,
+    .x = R.cls(asc.isXDigit),
 
-    .A = mkdefN(asc.isAlpha),
-    .C = mkdefN(asc.isCntrl),
-    .D = mkdefN(asc.isDigit),
-    .G = mkdefN(asc.isGraph),
-    .L = mkdefN(asc.isLower),
-    .P = mkdefN(asc.isPunct),
-    .S = mkdefN(asc.isSpace),
-    .U = mkdefN(asc.isUpper),
-    .X = mkdefN(asc.isXDigit),
-
-    // use "word" definition consistent w/PCRE and LPeg (includes '_')
-    // vs isalnum/ascii.AlNum (no '_')
-    .w = R.charset(wordset),
-    .W = R.charset(~wordset),
+    .A = invCls(asc.isAlpha),
+    .C = invCls(asc.isCntrl),
+    .D = invCls(asc.isDigit),
+    .G = invCls(asc.isGraph),
+    .L = invCls(asc.isLower),
+    .P = invCls(asc.isPunct),
+    .S = invCls(asc.isSpace),
+    .U = invCls(asc.isUpper),
+    .W = word.inv(),
+    .X = invCls(asc.isXDigit),
 };
 
 
