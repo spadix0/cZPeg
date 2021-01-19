@@ -46,12 +46,14 @@ pub const Pattern = struct {
         if (comptime (R == type)) // NB parse() fns always return optional
             return f();
 
-        comptime const E = ErrorOf(R);
-        comptime const T = StripOption(StripError(R));
+        const info = @typeInfo(R);
+        if (info != .ErrorUnion or @typeInfo(info.ErrorUnion.payload) != .Optional)
+            @compileError("parse functions return !?T, not " ++ @typeName(R));
+
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) R {
                 return f(p);
             }
         };
@@ -64,8 +66,8 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) ?void {
-                if (p.get(pattern.len)) |s| {
+            pub fn parse(p: *Parser) !?void {
+                if (try p.get(pattern.len)) |s| {
                     if (std.mem.eql(u8, s, pattern)) {
                         p.take(pattern.len);
                         return {};
@@ -81,8 +83,8 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) ?void {
-                if (p.get(n)) |_| {
+            pub fn parse(p: *Parser) !?void {
+                if (try p.get(n)) |_| {
                     p.take(n);
                     return {};
                 }
@@ -97,8 +99,8 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) ?void {
-                if (p.get(1)) |s| {
+            pub fn parse(p: *Parser) !?void {
+                if (try p.get(1)) |s| {
                     if (f(s[0])) {
                         p.take(1);
                         return {};
@@ -115,8 +117,8 @@ pub const Pattern = struct {
             pub usingnamespace PatternBuilder(@This());
             pub const chars = chars_;
 
-            pub fn parse(p: *Parser) ?void {
-                if (p.get(1)) |s| {
+            pub fn parse(p: *Parser) !?void {
+                if (try p.get(1)) |s| {
                     if (chars_ & @as(u256, 1)<<s[0] != 0) {
                         p.take(1);
                         return {};
@@ -147,8 +149,8 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) ?void {
-                if (p.get(1)) |s| {
+            pub fn parse(p: *Parser) !?void {
+                if (try p.get(1)) |s| {
                     if (lo <= s[0] and s[0] <= hi) {
                         p.take(1);
                         return {};
@@ -167,15 +169,12 @@ pub const Pattern = struct {
     pub fn ref(
         comptime scope: anytype,
         comptime name: []const u8,
-        comptime R: type,
+        comptime T: type,
     ) type {
-        comptime const E = ErrorOf(R);
-        comptime const T = StripError(R);
-
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) anyerror!?T {
                 return @field(scope.*, name).parse(p);
             }
         };
@@ -184,21 +183,17 @@ pub const Pattern = struct {
     /// matches only if pattern does not match (negative lookahead assertion)
     pub fn not(comptime pattern: anytype) type {
         comptime const P = pat(pattern);
-        comptime const E = MatchError(P);
-        if (comptime (MatchType(P) != void)) {
-            @compileLog(MatchType(P));
-            @compileError("Unsupported capture in not()");
-        }
+        if (comptime (MatchType(P) != void))
+            @compileError("Unsupported capture in not(): " ++ @typeName(MatchType(P)));
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, void) {
+            pub fn parse(p: *Parser) !?void {
                 const saved = p.save();
                 defer p.restore(saved);
 
-                const err = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(err))) try err else err;
+                const opt = try P.parse(p);
                 return if (opt == null) {} else null;
             }
         };
@@ -207,17 +202,16 @@ pub const Pattern = struct {
     /// matches pattern but consumes no input (positive lookahead assertion)
     pub fn if_(comptime pattern: anytype) type {
         comptime const P = pat(pattern);
-        comptime const E = MatchError(P);
         comptime const T = MatchType(P);
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 const saved = p.save();
                 defer p.restore(saved);
 
-                return P.parse(p);
+                return try P.parse(p);
             }
         };
     }
@@ -263,34 +257,21 @@ pub const Pattern = struct {
         comptime const deinit_info = @typeInfo(@TypeOf(deinitFn));
         comptime const fold_info = @typeInfo(@TypeOf(foldFn)).Fn;
         comptime const acc_info = @typeInfo(fold_info.args[0].arg_type.?);
-        comptime const A = acc_info.Pointer.child;
-        comptime const T = StripError(A);
-        comptime var E = MatchError(P);
-        // FIXME more unresolved return type hacks
-        E = E || ErrorOf(fold_info.return_type orelse void);
-        if (init_info == .Fn) {
-            E = E || ErrorOf(init_info.Fn.return_type.?);
-        } else if (init_info == .Type)
-            E = E || MatchError(init);
+        comptime const T = StripError(acc_info.Pointer.child);
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 const saved = p.save();
                 var acc: T = switch (comptime init_info) {
                     .Fn => |f| blk:{
                         var aerr = if (comptime(f.args.len == 0)) init() else init(p);
                         break :blk if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
                     },
-                    .Type => blk: {
-                        var aerr = init.parse(p);
-                        var aopt = if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
-                        if (aopt) |a| {
-                            break :blk a;
-                        } else
-                            return null;
-                    },
+                    .Type =>
+                        if (try init.parse(p)) |a| a
+                        else return null,
                     else => init,
                 };
                 errdefer
@@ -299,12 +280,9 @@ pub const Pattern = struct {
 
                 var m: usize = 0;
                 while (comptime (nmax < 0) or m < nmax) {
-                    const perr = P.parse(p);
-                    const opt =
-                        if (comptime canError(@TypeOf(perr))) try perr else perr;
+                    const opt = try P.parse(p);
                     if (opt) |c| {
-                        const ferr = foldFn(&acc, c);
-                        if (comptime canError(@TypeOf(ferr))) try ferr;
+                        try foldFn(&acc, c);
                     } else
                         break;
                     m += 1;
@@ -321,11 +299,11 @@ pub const Pattern = struct {
         };
     }
 
-    fn foldVoid(acc: *void, c: void) void { }
+    fn foldVoid(acc: *void, c: void) !void { }
 
     fn optionFolder(comptime T: type) Folder {
         const F = struct {
-            fn fold(acc: *?T, c: T) void {
+            fn fold(acc: *?T, c: T) !void {
                 std.debug.assert(acc.* == null);
                 acc.* = c;
             }
@@ -341,7 +319,7 @@ pub const Pattern = struct {
         const List = std.ArrayList(T);
 
         const F = struct {
-            fn init(p: *Parser) List { return List.init(p.alloc); }
+            fn init(p: *Parser) !List { return List.init(p.alloc); }
 
             fn deinit(p: *Parser, acc: *List) void { acc.deinit(); }
 
@@ -399,7 +377,6 @@ pub const Pattern = struct {
         }
 
         // filter match results w/captures
-        comptime var E: type = error{};
         comptime var Pats: [args.len]type = undefined;
         comptime var Caps: [args.len]type = undefined;
         comptime var ncaps = 0;
@@ -410,7 +387,6 @@ pub const Pattern = struct {
             else
                 pat(arg);
 
-            E = E || MatchError(Pats[i]);
             comptime const M = MatchType(Pats[i]);
             if (comptime (M != void)) {
                 Caps[ncaps] = M;
@@ -428,32 +404,31 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 var caps: T = undefined;
                 const saved = p.save();
                 comptime var j = 0;
 
                 inline for (Pats) |P, i| {
-                    const err = P.parse(p);
-                    const opt = if (comptime canError(@TypeOf(err))) try err else err;
-                    if (opt == null) {
+                    if (try P.parse(p)) |c| {
+                        if (comptime (MatchType(P) != void)) {
+                            switch (comptime ncaps) {
+                                0 => unreachable,
+                                1 => caps = c,
+                                else => {
+                                    comptime var buf: [32]u8 = undefined;
+                                    comptime const nm =
+                                        std.fmt.bufPrint(&buf, "{d}", .{j})
+                                        catch unreachable;
+                                    @field(caps, nm) = c;
+                                }
+                            }
+                            j += 1;
+                        }
+                    } else {
                         p.restore(saved);
                         return null;
                     }
-
-                    if (comptime (MatchType(P) != void))
-                        switch (ncaps) {
-                            0 => unreachable,
-                            1 => caps = opt.?,
-                            else => {
-                                comptime var buf: [128]u8 = undefined;
-                                comptime const nm =
-                                    std.fmt.bufPrint(&buf, "{d}", .{j})
-                                    catch unreachable;
-                                @field(caps, nm) = opt.?;
-                                j += 1;
-                            }
-                        };
                 }
                 return caps;
             }
@@ -473,32 +448,26 @@ pub const Pattern = struct {
 
         comptime var Pats: [args.len]type = undefined;
         Pats[0] = pat(args[0]);
-        comptime var E = MatchError(Pats[0]);
         comptime const T = MatchType(Pats[0]);
 
         inline for (args) |arg, i| {
             if (i > 0) {
                 Pats[i] = pat(arg);
-                E = E || MatchError(Pats[i]);
-                if(MatchType(Pats[i]) != T) {
-                    @compileLog(0, T);
-                    @compileLog(i, MatchType(Pats[i]));
+                if(MatchType(Pats[i]) != T)
                     @compileError(
-                        "Heterogeneous choice captures unsupported" ++
-                            " (try capturing each choice to an enum)");
-                }
+                        "Heterogeneous choice captures unsupported"
+                        ++ " (try capturing each choice to a tagged union) "
+                        ++ @typeName(Pats[i]) ++ " != " ++ @typeName(T));
             }
         }
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 const saved = p.save();
                 inline for (Pats) |P| {
-                    const err = P.parse(p);
-                    const opt = if (comptime canError(@TypeOf(err))) try err else err;
-                    if (opt) |c|
+                    if (try P.parse(p)) |c|
                         return c;
                     p.restore(saved);
                 }
@@ -515,7 +484,7 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) ?usize {
+            pub fn parse(p: *Parser) !?usize {
                 return p.pos();
             }
         };
@@ -526,7 +495,6 @@ pub const Pattern = struct {
     /// returned slice is only valid until parse buffer is updated.
     pub fn cap(comptime pattern: anytype) type {
         comptime const P = pat(pattern);
-        comptime const E = MatchError(P);
         comptime const M = MatchType(P);
         comptime const T = if (M == void)
             []const u8
@@ -536,11 +504,9 @@ pub const Pattern = struct {
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 const start = p.save();
-                const err = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(err))) try err else err;
-                if (opt) |sub| {
+                if (try P.parse(p)) |sub| {
                     const c = p.buf[start.idx..p.pos()];
                     if (comptime (M == void)) {
                         return c;
@@ -565,23 +531,19 @@ pub const Pattern = struct {
     ) type {
         comptime const P = pat(pattern);
         comptime const M = MatchType(P);
-        comptime const E = MatchError(P) || ErrorOf(R);
         comptime const T = StripOption(StripError(R));
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
 
-            pub fn parse(p: *Parser) MatchReturn(E, T) {
+            pub fn parse(p: *Parser) !?T {
                 const start = if (comptime (M != void)) {} else p.save();
-                const perr = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(perr))) try perr else perr;
-                if (opt) |sub| {
+                if (try P.parse(p)) |sub| {
                     const ferr =
                         if (comptime (M != void)) f(sub)
                         else if (comptime (@typeInfo(@TypeOf(f)).Fn.args.len == 0)) f()
                         else f(p.buf[start.idx .. p.pos()]);
-                    const v = if (comptime canError(@TypeOf(ferr))) try ferr else ferr;
-                    return v;
+                    return if (comptime canError(@TypeOf(ferr))) try ferr else ferr;
                 }
                 return null;
             }
@@ -665,20 +627,16 @@ fn PatternBuilder(comptime Self_: type) type {
         }
 
         /// match this pattern against provided string, returning any captures.
-        pub fn match(str: []const u8, alloc: *Allocator)
-            MatchReturn(MatchError(Self), MatchType(Self))
-        {
+        pub fn match(str: []const u8, alloc: *Allocator) !?MatchType(Self) {
             var p = Parser.init(str, alloc);
-            return p.match(Self);
+            return try p.match(Self);
         }
 
         /// match this pattern against provided string, returning any captures.
         /// Allocations are disallowed; any attempt to allocate will panic.
-        pub fn matchLean(str: []const u8)
-            MatchReturn(MatchError(Self), MatchType(Self))
-        {
+        pub fn matchLean(str: []const u8) !?MatchType(Self) {
             var p = Parser.init(str, &noalloc);
-            return p.match(Self);
+            return try p.match(Self);
         }
     };
 }
@@ -698,16 +656,6 @@ pub fn MatchType(comptime P: type) type {
     };
 }
 
-/// introspect capture error set from Pattern or default to empty error set
-fn MatchError(comptime P: type) type {
-    return comptime ErrorOf(@typeInfo(@TypeOf(P.parse)).Fn.return_type.?);
-}
-
-/// rewrap new capture result in option and optional error
-fn MatchReturn(comptime E: type, comptime T: type) type {
-    return comptime if (isError(E)) E!?T else ?T;
-}
-
 
 /// extract payload from outer error union or return type directly
 fn StripError(comptime T: type) type {
@@ -723,27 +671,6 @@ fn StripOption(comptime T: type) type {
     return comptime switch (@typeInfo(T)) {
         .Optional => |opt| opt.child,
         else => T,
-    };
-}
-
-/// extract error set from outer error union or return empty error set
-fn ErrorOf(comptime T: type) type {
-    return comptime switch (@typeInfo(T)) {
-        .ErrorUnion => |eu| eu.error_set,
-        .ErrorSet => T,
-        else => error{}
-    };
-}
-
-/// detect empty error sets
-fn isError(comptime Error: type) bool {
-    return comptime switch (@typeInfo(Error)) {
-        .ErrorUnion => |eu| isError(eu.error_set),
-        .ErrorSet => |errset|
-            if (errset) |errs|
-                errs.len > 0
-            else true,
-        else => false
     };
 }
 
@@ -770,19 +697,17 @@ pub const Parser = struct {
     }
 
     /// match current string against provided pattern
-    pub fn match(self: *@This(), comptime pattern: anytype) blk:{
-        comptime const P = Pattern.pat(pattern);
-        @setEvalBranchQuota(1<<20);
-        break :blk MatchReturn(MatchError(P), MatchType(P));
-    } {
-        return Pattern.pat(pattern).parse(self);
+    pub fn match(self: *@This(), comptime pattern: anytype)
+        !?MatchType(Pattern.pat(pattern))
+    {
+        return try Pattern.pat(pattern).parse(self);
     }
 
     pub fn pos(self: *@This()) usize {
         return self.state.idx;
     }
 
-    pub fn get(p: *@This(), n: usize) ?[]const u8 {
+    pub fn get(p: *@This(), n: usize) !?[]const u8 {
         if (p.state.idx + n <= p.buf.len)
             return p.buf[p.state.idx..p.state.idx+n];
         return null;
@@ -808,11 +733,11 @@ var noalloc = Allocator {
     .resizeFn = noResize,
 };
 
-fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) ![]u8 {
+fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) Allocator.Error![]u8 {
     std.debug.panic("Unsanctioned allocation during pattern match", .{});
 }
 
-fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) !usize {
+fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) Allocator.Error!usize {
     unreachable;
 }
 
@@ -823,7 +748,7 @@ const expectStr = testing.expectEqualStrings;
 const panic = std.debug.panic;
 
 pub fn expectOk(ev: anytype) StripError(@TypeOf(ev)) {
-    if (comptime !isError(@TypeOf(ev))) {
+    if (comptime !canError(@TypeOf(ev))) {
         return ev;
     } else if(ev) |v| {
         return v;
@@ -1148,7 +1073,7 @@ test "Pattern.rep capture" {
 
     const nums = rep(1, -1, .{
         rep(1, -1, .{ rep(0, 1, "-"), span('0', '9') })
-            .grok(error{Overflow,InvalidCharacter}!u32, parseU32Dec),
+            .grok(u32, parseU32Dec),
         rep(0, 1, ",")
     });
     chkNoM(nums, "");
@@ -1263,7 +1188,7 @@ test "Pattern.grok" {
             span('a', 'z').rep(1, -1),
             "=",
             rep(0, 1, "-").span('0', '9').rep(1, -1)
-                .grok(error{Overflow,InvalidCharacter}!u32, parseU32Dec),
+                .grok(u32, parseU32Dec),
         });
     };
 

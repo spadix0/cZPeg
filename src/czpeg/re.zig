@@ -23,11 +23,11 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         const pattern = exp._(-1);
 
         pub const exp = spc._(.{ grammar, alt });
-        const expref = P.ref(&@This(), "exp", anyerror!type);
+        const expref = P.ref(&@This(), "exp", type);
 
         const grammar = rule.foldRep(0, -1, rule, {}, foldFirst);
 
-        fn foldFirst(comptime acc: *type, comptime rule: type) void { }
+        fn foldFirst(comptime acc: *type, comptime rule: type) !void { }
 
         pub const rule = P.seq(.{ name.cap(), spc, "<-", expref })
             .grok(type, saveRule);
@@ -40,17 +40,17 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         const alt = P.seq(.{ "/", spc, seq })
             .foldRep(0, -1, seq, {}, foldAlt);
 
-        fn foldAlt(comptime acc: *type, comptime pat: type) void {
+        fn foldAlt(comptime acc: *type, comptime pat: type) !void {
             acc.* = R.alt(.{ acc.*, pat });
         }
 
         const seq = pfx.foldRep(0, -1, genConst(R.pat(true)).gen, {}, foldCat);
 
-        fn foldCat(comptime acc: *type, comptime pat: type) void {
+        fn foldCat(comptime acc: *type, comptime pat: type) !void {
             acc.* = P.cat(acc.*, pat);
         }
 
-        const pfxref = P.ref(&@This(), "pfx", anyerror!type);
+        const pfxref = P.ref(&@This(), "pfx", type);
         pub const pfx = P.alt(.{
             .{ "&", spc, pfxref.grok(type, R.if_) },
             .{ "!", spc, pfxref.grok(type, R.not) },
@@ -70,7 +70,7 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
             spc
         }).foldRep(0, -1, P.cat(pri, spc), {}, foldSfx);
 
-        fn foldSfx(comptime acc: *type, comptime composer: type) void {
+        fn foldSfx(comptime acc: *type, comptime composer: type) !void {
             acc.* = composer.compose(acc.*);
         }
 
@@ -115,14 +115,11 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         fn refRule(comptime nm: []const u8) type {
             if (!@hasField(@TypeOf(g), nm))
                 @compileError("undefined reference to rule " ++ nm);
-            return @field(g, nm); // R.ref(&g, nm, anyerror!type);
+            return @field(g, nm); // R.ref(&g, nm, type);
         }
     };
 
-    comptime const merr = RE.pattern.matchLean(re);
-    comptime const m =
-        if (comptime (@typeInfo(@TypeOf(merr)) != .ErrorUnion)) merr
-        else if (merr) |v| v
+    comptime const m = if (RE.pattern.matchLean(re)) |v| v
         else |e| @compileError(
             "error " ++ @errorName(e) ++ " while parsing pattern: '" ++ re ++ "'");
     if (comptime (m == null))
@@ -135,30 +132,31 @@ const Preparse = struct {
     const first_rule = P.seq(.{ spc, name.cap(), spc, "<-" });
 
     const findRule = struct {
-        pub fn parse(p: *Parser) ?[]const u8 {
+        pub fn parse(p: *Parser) !?[]const u8 {
             while (true) {
-                _ = P.charset(~id0set).rep(0, -1).parse(p);
-                if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
+                _ = try P.charset(~id0set).rep(0, -1).parse(p);
+                if (try P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
                     return r;
-                if (P.charset(id0set).rep(1, -1).parse(p) == null)
+                if ((try P.charset(id0set).rep(1, -1).parse(p)) == null)
                     return null;
             }
         }
     };
 
-    fn foldCount(acc: *usize, c: []const u8) void {
+    const count_rules = P.foldRep(0, -1, findRule, 0, {}, foldCount);
+
+    fn foldCount(acc: *usize, c: []const u8) !void {
         acc.* += 1;
     }
-    const count_rules = P.foldRep(0, -1, findRule, 0, {}, foldCount);
 
     /// generate struct type to hold named productions
     fn GrammarType(re: []const u8) type {
-        const n = count_rules.matchLean(re).?;
+        const n = (try count_rules.matchLean(re)).?;
         var fields: [n]TypeInfo.StructField = undefined;
         var i = 0;
         var p = Parser.init(re, &noalloc);
         @setEvalBranchQuota(1<<16);
-        while (findRule.parse(&p)) |r| {
+        while (try findRule.parse(&p)) |r| {
             fields[i] = .{
                 .name = r,
                 .field_type = type,
@@ -201,18 +199,18 @@ fn genCls(comptime s: anytype) ?type {
 
 /// fold character classes without allocating captures
 const mergeItems = struct {
-    pub fn parse(p: *Parser) ?type {
-        const c0 = item.parse(p);
+    pub fn parse(p: *Parser) !?type {
+        const c0 = try item.parse(p);
         if (c0 == null)
             @compileError("unexpected end of pattern in class");
 
         comptime var cs: u256 = c0.?.chars;
 
         while (true) {
-            if (p.get(1)) |s| {
+            if (try p.get(1)) |s| {
                 if (s[0] == ']')
                     break;
-                if (comptime item.parse(p)) |c| {
+                if (comptime try item.parse(p)) |c| {
                     cs |= c.chars;
                     continue;
                 }
@@ -252,8 +250,7 @@ const str = P.alt(.{
     .{ "\"", P.not("\"")._(1).rep(0, -1).cap(), "\"" },
 });
 
-const ParseError = error{Overflow,InvalidCharacter};
-const num = classes.d.rep(1, -1).grok(ParseError!u32, parseU32Dec);
+const num = classes.d.rep(1, -1).grok(u32, parseU32Dec);
 
 fn parseU32Dec(s: []const u8) !u32 {
     return try std.fmt.parseInt(u32, s, 10);
@@ -493,7 +490,7 @@ test "cls neg" {
 test "Preparse.count_rules" {
     const G = struct {
         fn chkCount(exp: usize, comptime s: []const u8) void {
-            expectEqual(exp, Preparse.count_rules.matchLean(s).?);
+            expectEqual(exp, czpeg.expectOk(Preparse.count_rules.matchLean(s)).?);
         }
     };
 
