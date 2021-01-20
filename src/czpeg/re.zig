@@ -1,11 +1,8 @@
 const std = @import("std");
 const asc = std.ascii;
-const TypeInfo = std.builtin.TypeInfo;
-const Allocator = std.mem.Allocator;
 
 const czpeg = @import("../czpeg.zig");
 const util = @import("util.zig");
-const Parser = czpeg.Parser;
 const P = czpeg.Pattern;
 
 // taking cue from LPeg, make this (semantic only) distinction:
@@ -14,29 +11,13 @@ const P = czpeg.Pattern;
 // (although P does reuse `classes` table, which is on R...)
 const R = P;
 
-/// build parser by parsing PEG pattern or grammar.  returns toplevel pattern
-/// or first grammar rule.
+/// Parse PEG-style regular expression and return czpeg pattern
 pub fn compile(comptime re: []const u8, comptime args: anytype) type {
-    comptime const G = Preparse.GrammarType(re);
-    comptime var g: G = undefined;
-
     const RE = struct {
         const pattern = exp._(-1);
 
-        pub const exp = spc._(.{ grammar, alt });
+        pub const exp = spc._(alt);
         const expref = P.ref(&@This(), "exp", anyerror!type);
-
-        const grammar = rule.foldRep(0, -1, rule, {}, foldFirst);
-
-        fn foldFirst(comptime acc: *type, comptime rule: type) void { }
-
-        pub const rule = P.seq(.{ name.cap(), spc, "<-", expref })
-            .grok(type, saveRule);
-
-        fn saveRule(comptime spec: anytype) type {
-            @field(g, spec[0]) = spec[1];
-            return spec[1];
-        }
 
         const alt = P.seq(.{ "/", spc, seq })
             .foldRep(0, -1, seq, {}, foldAlt);
@@ -100,7 +81,7 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
             P.grok(type, R.pos, "{}"),
             .{ "{", expref.grok(type, R.cap), "}" },
             P.grok(type, genConst(R.any(1)).gen, "."),
-            P.grok(type, refRule, name._(P.not(.{ spc, "<-" })).cap()),
+            P.grok(type, refArg, name.cap()),
         });
 
         fn genConst(comptime pat: type) type {
@@ -109,10 +90,8 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
             };
         }
 
-        fn refRule(comptime nm: []const u8) type {
-            if (!@hasField(@TypeOf(g), nm))
-                @compileError("undefined reference to rule " ++ nm);
-            return @field(g, nm); // R.ref(&g, nm, anyerror!type);
+        fn refArg(comptime nm: []const u8) type {
+            return @field(args, nm);
         }
     };
 
@@ -126,56 +105,6 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
         @compileError("invalid pattern: \"" ++ re ++ "\"");
     return m.?;
 }
-
-
-const Preparse = struct {
-    const first_rule = P.seq(.{ spc, name.cap(), spc, "<-" });
-
-    const findRule = struct {
-        pub fn parse(p: *Parser) ?[]const u8 {
-            while (true) {
-                _ = word0.inv().rep(0, -1).parse(p);
-                if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
-                    return r;
-                if (word0.rep(1, -1).parse(p) == null)
-                    return null;
-            }
-        }
-    };
-
-    fn foldCount(acc: *usize, c: []const u8) void {
-        acc.* += 1;
-    }
-    const count_rules = P.foldRep(0, -1, findRule, 0, {}, foldCount);
-
-    /// generate struct type to hold named productions
-    fn GrammarType(re: []const u8) type {
-        const n = count_rules.matchLean(re).?;
-        var fields: [n]TypeInfo.StructField = undefined;
-        var i = 0;
-        var p = Parser.init(re, &util.noalloc);
-        @setEvalBranchQuota(1<<16);
-        while (findRule.parse(&p)) |r| {
-            fields[i] = .{
-                .name = r,
-                .field_type = type,
-                .default_value = @as(?type, null),
-                .is_comptime = false,
-                .alignment = 0,
-            };
-            i += 1;
-        }
-
-        return @Type(.{
-            .Struct = .{
-                .layout = .Auto,
-                .fields = &fields,
-                .decls = &[_]TypeInfo.Declaration{},
-                .is_tuple = false,
-            }
-        });
-    }
-};
 
 
 const spc = P.alt(.{
@@ -285,8 +214,8 @@ const chkError = util.chkError;
 // checkers that force comptime parser for testing patterns on R
 // (works without sometimes, but not always)
 
-pub fn ctChkNoM(comptime pat: anytype, comptime s: []const u8) void {
-    comptime var p = Parser.init(s, &util.noalloc);
+fn ctChkNoM(comptime pat: anytype, comptime s: []const u8) void {
+    comptime var p = czpeg.Parser.init(s, &util.noalloc);
     comptime const m = expectOk(p.match(pat));
     if (comptime (m != null)) {
         @compileLog("length", comptime p.pos(), "match", m);
@@ -298,10 +227,10 @@ pub fn ctChkNoM(comptime pat: anytype, comptime s: []const u8) void {
     }
 }
 
-pub fn ctChkCap(comptime pat: anytype, comptime s: []const u8, comptime n: usize)
+fn ctChkCap(comptime pat: anytype, comptime s: []const u8, comptime n: usize)
     czpeg.MatchType(P.pat(pat))
 {
-    comptime var p = Parser.init(s, &util.noalloc);
+    comptime var p = czpeg.Parser.init(s, &util.noalloc);
     comptime const m = expectOk(p.match(pat));
     if (comptime (m == null))
         @compileError("expected match, found null ("
@@ -313,11 +242,15 @@ pub fn ctChkCap(comptime pat: anytype, comptime s: []const u8, comptime n: usize
     return comptime m.?;
 }
 
-pub fn ctChkMatch(comptime pat: anytype, comptime s: []const u8, comptime n: usize) void {
+fn ctChkMatch(comptime pat: anytype, comptime s: []const u8, comptime n: usize) void {
     comptime const m = ctChkCap(pat, s, n);
     if (comptime (m != {}))
         @compileError("expected non-capturing match, found "
                       ++ @typeName(@TypeOf(m)));
+}
+
+pub fn chkFull(comptime pat: anytype, s: []const u8) void {
+    chkMatch(pat, s, s.len);
 }
 
 
@@ -429,36 +362,6 @@ test "cls neg" {
     chkMatch(p, "[", 1);
     chkMatch(p, ".", 1);
     chkMatch(p, "%", 1);
-}
-
-test "Preparse.count_rules" {
-    const G = struct {
-        fn chkCount(exp: usize, comptime s: []const u8) void {
-            expectEqual(exp, Preparse.count_rules.matchLean(s).?);
-        }
-    };
-
-    G.chkCount(0, "");
-    G.chkCount(0, "yomama wuz here");
-    G.chkCount(1, " ( a <- )");
-    G.chkCount(1, " a <- ");
-    G.chkCount(1, "a <- <- invalid anyway");
-    G.chkCount(3, "a<-some junk ... b <- and more / c <- %<[] <-");
-}
-
-test "Preparse.GrammarType" {
-    const G = struct {
-        fn chkRules(comptime s: []const u8, comptime exp: anytype) void {
-            comptime const Rules = Preparse.GrammarType(s);
-            comptime const fields = @typeInfo(Rules).Struct.fields;
-            expectEqual(exp.len, fields.len);
-            inline for (exp) |nm, i|
-                expectEqual(@as([]const u8, nm), fields[i].name);
-        }
-    };
-    G.chkRules("", .{});
-    G.chkRules("a <- ...", .{ "a" });
-    G.chkRules("meh {(x <- ...) y<-foo z<-bar}", .{ "x", "y", "z" });
 }
 
 test "compile str" {
@@ -606,55 +509,126 @@ test "alt" {
     chkMatch(p, "baa", 2);
 }
 
-test "rule" {
-    const p = compile("(ab <- 'a'+ 'b'+) ab", .{});
-    chkNoM(p, "");
-    chkNoM(p, "ab");
-    chkMatch(p, "abab", 4);
-    chkMatch(p, "aaababbba", 8);
-}
-
 // re grammar
 // edited from http://www.inf.puc-rio.br/~roberto/lpeg/re.html
+//  * remove multiple rule grammars entirely (just integrate w/czpeg instead)
 //  * remove old-style "<name>" non-terminals
 //  * remove substitution, table, fold, string, number and -> captures
 //  * remove named and anonymous group captures
 //  * remove back-references
 //  * change comments to use "//" for consistency w/zig
 
-const test_grammar =
-  \\ pattern	<- exp !.
-  \\ exp	<- S (grammar / alt)
-  \\
-  \\ grammar	<- rule+
-  \\ rule	<- name arrow exp
-  \\
-  \\ alt	<- seq ('/' S seq)*
-  \\ seq	<- prefix*
-  \\ prefix	<- '&' S prefix
-  \\		 / '!' S prefix
-  \\		 / suffix
-  \\ suffix	<- primary S (([+*?]
-  \\		     / '^' [+-]? num
-  \\		     / '=>' S name) S)*
-  \\
-  \\ primary	<- '(' exp ')'
-  \\		 / string
-  \\		 / class
-  \\		 / def
-  \\		 / '{}'
-  \\		 / '{' exp '}'
-  \\		 / '.'
-  \\		 / name !arrow
-  \\
-  \\ class	<- '[' '^'? item (!']' item)* ']'
-  \\ item	<- def / range / .
-  \\ range	<- . '-' [^]]
-  \\
-  \\ S		<- (%s / '//' [^\n]*)*		// spaces and comments
-  \\ name	<- [%a_]%w*
-  \\ arrow	<- S '<-'
-  \\ num	<- %d+
-  \\ string	<- '"' [^"]* '"' / "'" [^']* "'"
-  \\ def	<- '%' name
-;
+// pattern  <- exp !.
+// exp      <- S seq ('/' S seq)*
+// seq      <- prefix*
+// prefix   <- '&' S prefix
+//           / '!' S prefix
+//           / suffix
+// suffix   <- primary S (([+*?]
+//           / '^' [+-]? num
+//           / '=>' S name) S)*
+//
+// primary  <- '(' exp ')'
+//           / string
+//           / class
+//           / def
+//           / '{}'
+//           / '{' exp '}'
+//           / '.'
+//           / name
+//
+// class    <- '[' '^'? item (!']' item)* ']'
+// item     <- def / range / .
+// range    <- . '-' [^]]
+//
+// S        <- (%s / '//' [^\n]*)*      // spaces and comments
+// name     <- [%a_]%w*
+// num      <- %d+
+// string   <- '"' [^"]* '"' / "'" [^']* "'"
+// def      <- '%' name
+
+test "PEG pattern grammar" {
+    const PEG = struct {
+        pub const pattern = compile("exp !.", refs);
+        pub const exp = compile("S seq ('/' S seq)*", refs);
+        pub const seq = compile("prefix*", refs);
+        pub const prefix = compile(
+            \\   '&' S prefix
+            \\ / '!' S prefix
+            \\ / suffix
+        , refs);
+        pub const suffix = compile(
+            \\   primary S (([+*?]
+            \\ / '^' [+-]? %d+
+            \\ / '=>' S name) S)*
+        , refs);
+
+        pub const primary = compile(
+            \\   '(' exp ')'
+            \\ / string
+            \\ / '[' '^'? item (!']' item)* ']'
+            \\ / def
+            \\ / '{}'
+            \\ / '{' exp '}'
+            \\ / '.'
+            \\ / name
+        , refs);
+
+        pub const item_ = compile("def / . '-' [^]] / .", refs);
+
+        pub const S = compile("(%s / '//' [^\n]*)* // spaces and comments", .{});
+        pub const name_ = compile("[_%a]%w*", .{});
+        pub const string = compile(
+            \\ '"' [^"]* '"' / "'" [^']* "'"
+        , .{});
+        pub const def_ = compile("'%' name", refs);
+
+        fn ref(nm: []const u8) type {
+            return P.ref(&@This(), nm, void);
+        }
+
+        const refs = .{
+            .exp = ref("exp"),
+            .seq = ref("seq"),
+            .prefix = ref("prefix"),
+            .suffix = ref("suffix"),
+            .primary = ref("primary"),
+            .item = ref("item_"),
+            .S = ref("S"),
+            .name = ref("name_"),
+            .string = ref("string"),
+            .def = ref("def_"),
+        };
+    };
+
+    chkNoM(PEG.pattern, "<-");
+    chkFull(PEG.pattern, "exp !.");
+    chkFull(PEG.pattern, "S seq ('/' S seq)*");
+    chkFull(PEG.pattern, "prefix*");
+    chkFull(PEG.pattern,
+        \\   '&' S prefix
+        \\ / '!' S prefix
+        \\ / suffix
+    );
+    chkFull(PEG.pattern,
+        \\   primary S (([+*?]
+        \\ / '^' [+-]? %d+
+        \\ / '=>' S name) S)*
+    );
+    chkFull(PEG.pattern,
+        \\   '(' exp ')'
+        \\ / string
+        \\ / '[' '^'? item (!']' item)* ']'
+        \\ / def
+        \\ / '{}'
+        \\ / '{' exp '}'
+        \\ / '.'
+        \\ / name
+    );
+    chkFull(PEG.pattern, "def / . '-' [^]] / .");
+    chkFull(PEG.pattern, "(%s / '//' [^\n]*)* // spaces and comments");
+    chkFull(PEG.pattern,
+        \\ '"' [^"]* '"' / "'" [^']* "'"
+    );
+    chkFull(PEG.pattern, "'%' name");
+}

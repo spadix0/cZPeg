@@ -1,5 +1,4 @@
 const std = @import("std");
-const math = std.math;
 const meta = std.meta;
 const Allocator = std.mem.Allocator;
 
@@ -886,7 +885,6 @@ pub const Parser = struct {
 //----------------------------------------------------------------------------
 const testing = std.testing;
 const expectStr = testing.expectEqualStrings;
-const expectOk = util.expectOk;
 const expectEqual = util.expectEqual;
 const chkNoM = util.chkNoM;
 const chkMatch = util.chkMatch;
