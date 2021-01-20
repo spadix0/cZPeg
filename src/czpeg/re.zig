@@ -109,10 +109,10 @@ pub fn compile(comptime re: []const u8, comptime args: anytype) type {
 
 const spc = P.alt(.{
     classes.s,
-    .{ "//", P.charset(~(@as(u256, 1) << '\n')).rep(0, -1) },
-}).rep(0, -1);
+    .{ "//", P.charset(~(@as(u256, 1) << '\n')).more(0) },
+}).more(0);
 
-const name = word0._(word.rep(0, -1));
+const name = word0._(word.more(0));
 
 const cls = P.seq(.{
     "[",
@@ -155,12 +155,12 @@ fn getDef(comptime s: []const u8) type {
 }
 
 const str = P.alt(.{
-    .{ "'", P.not("'")._(1).rep(0, -1).cap(), "'" },
-    .{ "\"", P.not("\"")._(1).rep(0, -1).cap(), "\"" },
+    .{ "'", P.not("'")._(1).more(0).cap(), "'" },
+    .{ "\"", P.not("\"")._(1).more(0).cap(), "\"" },
 });
 
 const ParseError = error{Overflow,InvalidCharacter};
-const num = classes.d.rep(1, -1).grok(ParseError!u32, parseU32Dec);
+const num = classes.d.more(1).grok(ParseError!u32, parseU32Dec);
 
 fn parseU32Dec(s: []const u8) !u32 {
     return try std.fmt.parseInt(u32, s, 10);

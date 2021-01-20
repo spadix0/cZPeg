@@ -413,7 +413,7 @@ pub const Pattern = struct {
         };
     }
 
-    /// matches pattern repeatedly
+    /// match `pattern` repeatedly
     ///   * `nmin` to `nmax` — inclusive repitition specification.
     ///      use nmax < 0 for unbounded
     ///   * captures nothing if pattern does not capture, otherwise
@@ -437,6 +437,14 @@ pub const Pattern = struct {
             const fns = arrayFolder(M);
             return foldRep(nmin, nmax, P, fns.init, fns.deinit, fns.fold);
         }
+    }
+
+    /// match `pattern` at least `n` times with no (specified) upper bound.
+    /// `more(n, p)` is preferred alternative to `rep(n, -1, p)`.
+    /// `more(0, p)` is equivalent to PEG `*`,
+    /// `more(1, p)` is equivalent to PEG `+`
+    pub fn more(comptime n: comptime_int, comptime pattern: anytype) type {
+        return rep(n, -1, pattern);
     }
 
     /// match concatenation of 2 patterns (special case of .seq() with 2 args).
@@ -720,6 +728,15 @@ fn PatternBuilder(comptime Self_: type) type {
             return P.rep(nmin, nmax, Self);
         }
 
+        /// match this pattern at least `n` times with no (specified) upper
+        /// bound.  `more(n)` is preferred alternative to `rep(n, -1)`
+        /// `more(0)` is equivalent to PEG `*`,
+        /// `more(1)` is equivalent to PEG `+`.
+        /// Prefer this to using Pattern.more() directly.
+        pub fn more(comptime n: comptime_int) type {
+            return P.more(n, Self);
+        }
+
         /// try to match another choice if this does not match.
         /// prefer Pattern.alt() for > 2 choices.
         pub fn or_(comptime pattern: anytype) type {
@@ -969,8 +986,8 @@ test "Pattern.cls" {
         chkNoM(p, &.{i});
         chkNoM(cs, &.{i});
     }
-    chkMatch(p.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
-    chkMatch(cs.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
+    chkMatch(p.more(1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
+    chkMatch(cs.more(1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
 }
 
 test "Pattern.span" {
@@ -1297,7 +1314,7 @@ test "alt charsets" {
     chkNoM(p, "d");
     chkNoM(p, "0");
     chkNoM(p, "4");
-    chkMatch(p.rep(0, -1), "abc123", 6);
+    chkMatch(p.more(0), "abc123", 6);
 }
 
 test "Pattern.pos" {
@@ -1305,8 +1322,8 @@ test "Pattern.pos" {
     expectEqual(@as(usize, 0), chkCap(pat(0).pos(), "", 0));
 
     const p = pat(.{
-        pat("a").rep(0, -1).pos(),
-        pat("b").rep(0, -1)
+        pat("a").more(0).pos(),
+        pat("b").more(0)
     });
     expectEqual(@as(usize, 0), chkCap(p, "", 0));
     expectEqual(@as(usize, 1), chkCap(p, "ac", 1));
@@ -1319,9 +1336,9 @@ test "Pattern.cap" {
 
         // [a-c]*([x-z]+)[a-c]*$
         const p = pat(.{
-            span('a', 'c').rep(0, -1),
-            span('x', 'z').rep(1, -1).cap(),
-            span('a', 'c').rep(0, -1),
+            span('a', 'c').more(0),
+            span('x', 'z').more(1).cap(),
+            span('a', 'c').more(0),
         });
 
         const err = cap(injectError);
@@ -1346,9 +1363,9 @@ test "Pattern.cap nested" {
         usingnamespace Pattern;
 
         const p = seq(.{
-            set("a").inv().rep(0, -1),
-            set("a").rep(1, -1).cap(),
-            set("a").inv().rep(0, -1),
+            set("a").inv().more(0),
+            set("a").more(1).cap(),
+            set("a").inv().more(0),
         }).cap();
     };
 
@@ -1373,9 +1390,9 @@ test "Pattern.grok" {
         usingnamespace Pattern;
 
         const p = pat(.{
-            span('a', 'z').rep(1, -1),
+            span('a', 'z').more(1),
             "=",
-            rep(0, 1, "-").span('0', '9').rep(1, -1)
+            rep(0, 1, "-").span('0', '9').more(1)
                 .grok(error{Overflow,InvalidCharacter}!u32, parseU32Dec),
         });
     };
@@ -1420,9 +1437,9 @@ test "Pattern.grok sub" {
         }
 
         const p = P.seq(.{
-            P.span('a', 'z').rep(1, -1).cap(),
+            P.span('a', 'z').more(1).cap(),
             "=",
-            P.span('0', ':').rep(1, -1).grok(anyerror!u32, parseU32Dec),
+            P.span('0', ':').more(1).grok(anyerror!u32, parseU32Dec),
         }).grok(@This(), grok);
     };
 
@@ -1437,7 +1454,7 @@ test "Pattern.grok sub" {
 test "blind greedy" {
     const G = struct {
         usingnamespace Pattern;
-        const p = pat(.{ span('a', 'z').rep(0, -1), "1" });
+        const p = pat(.{ span('a', 'z').more(0), "1" });
     };
     chkMatch(G.p, "count123", 6);
     chkNoM(G.p, "count2");
@@ -1480,7 +1497,7 @@ test "non-blind non-greedy c comment grammar" {
 test "c comment, negative lookahead" {
     const seq = Pattern.seq;
     const not = Pattern.not;
-    const com = seq(.{ "/*", (not("*/")._(1)).rep(0, -1), "*/" });
+    const com = seq(.{ "/*", (not("*/")._(1)).more(0), "*/" });
 
     chkNoM(com, "");
     chkNoM(com, "a");
@@ -1502,7 +1519,7 @@ test "predication" {
                 .{ "int", "float" },
                 not(span('a', 'z'))
             }),
-            span('a', 'z').rep(1, -1),
+            span('a', 'z').more(1),
         });
     };
 
