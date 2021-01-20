@@ -4,6 +4,7 @@ const meta = std.meta;
 const Allocator = std.mem.Allocator;
 
 pub const re = @import("czpeg/re.zig");
+const util = @import("czpeg/util.zig");
 
 /// Namespace for "pattern" factories.  Each pattern is a new (duck) type that
 /// implements `.parse()`.  Pattern factories introspect their parameters *at
@@ -68,6 +69,10 @@ pub const Pattern = struct {
                 pub fn toCharset() type {
                     return charset(@as(u256, 1) << pattern[0]);
                 }
+
+                pub fn inv() type {
+                    return @This().toCharset().inv();
+                }
             };
 
             pub fn parse(p: *Parser) ?void {
@@ -113,6 +118,10 @@ pub const Pattern = struct {
                         cs |= 1 << c;
                 }
                 return charset(cs);
+            }
+
+            pub fn inv() type {
+                return @This().toCharset().inv();
             }
 
             pub fn parse(p: *Parser) ?void {
@@ -182,6 +191,10 @@ pub const Pattern = struct {
                 return charset(cs);
             }
 
+            pub fn inv() type {
+                return @This().toCharset().inv();
+            }
+
             pub fn parse(p: *Parser) ?void {
                 if (p.get(1)) |s| {
                     if (lo <= s[0] and s[0] <= hi) {
@@ -233,8 +246,12 @@ pub const Pattern = struct {
                 defer p.restore(saved);
 
                 const err = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(err))) try err else err;
-                return if (opt == null) {} else null;
+                const opt =
+                    if (comptime canError(@TypeOf(err))) try err
+                    else err;
+                return
+                    if (opt == null) {}
+                    else null;
             }
         };
     }
@@ -278,7 +295,7 @@ pub const Pattern = struct {
 
     /// match `pattern` repeatedly, using supplied function(s) to accumulate
     /// captures.
-    ///   * `nmin` to `nmax` — inclusive repitition specification.
+    ///   * `nmin` to `nmax` — inclusive repetition specification.
     ///      use nmax < 0 for unbounded
     ///   * `pattern` — to fold captures of
     ///   * `folder` — functions to merge new captures
@@ -315,12 +332,18 @@ pub const Pattern = struct {
                 const saved = p.save();
                 var acc: T = switch (comptime init_info) {
                     .Fn => |f| blk:{
-                        var aerr = if (comptime(f.args.len == 0)) init() else init(p);
-                        break :blk if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
+                        var aerr =
+                            if (comptime(f.args.len == 0)) init()
+                            else init(p);
+                        break :blk
+                            if (comptime canError(@TypeOf(aerr))) try aerr
+                            else aerr;
                     },
                     .Type => blk: {
                         var aerr = init.parse(p);
-                        var aopt = if (comptime canError(@TypeOf(aerr))) try aerr else aerr;
+                        var aopt =
+                            if (comptime canError(@TypeOf(aerr))) try aerr
+                            else aerr;
                         if (aopt) |a| {
                             break :blk a;
                         } else
@@ -336,7 +359,8 @@ pub const Pattern = struct {
                 while (comptime (nmax < 0) or m < nmax) {
                     const perr = P.parse(p);
                     const opt =
-                        if (comptime canError(@TypeOf(perr))) try perr else perr;
+                        if (comptime canError(@TypeOf(perr))) try perr
+                        else perr;
                     if (opt) |c| {
                         const ferr = foldFn(&acc, c);
                         if (comptime canError(@TypeOf(ferr))) try ferr;
@@ -470,7 +494,9 @@ pub const Pattern = struct {
 
                 inline for (Pats) |P, i| {
                     const err = P.parse(p);
-                    const opt = if (comptime canError(@TypeOf(err))) try err else err;
+                    const opt =
+                        if (comptime canError(@TypeOf(err))) try err
+                        else err;
                     if (opt == null) {
                         p.restore(saved);
                         return null;
@@ -517,13 +543,12 @@ pub const Pattern = struct {
                 Pats[i] = pat(arg);
                 is_charset = is_charset and @hasDecl(Pats[i], "toCharset");
                 E = E || MatchError(Pats[i]);
-                if(MatchType(Pats[i]) != T) {
-                    @compileLog(0, T);
-                    @compileLog(i, MatchType(Pats[i]));
+
+                if (MatchType(Pats[i]) != T)
                     @compileError(
-                        "Heterogeneous choice captures unsupported" ++
-                            " (try capturing each choice to an enum)");
-                }
+                        "Heterogeneous choice captures unsupported"
+                        ++ " (try capturing each choice to a tagged union) "
+                        ++ @typeName(Pats[i]) ++ " != " ++ @typeName(T));
             }
         }
 
@@ -542,7 +567,9 @@ pub const Pattern = struct {
                 const saved = p.save();
                 inline for (Pats) |P| {
                     const err = P.parse(p);
-                    const opt = if (comptime canError(@TypeOf(err))) try err else err;
+                    const opt =
+                        if (comptime canError(@TypeOf(err))) try err
+                        else err;
                     if (opt) |c|
                         return c;
                     p.restore(saved);
@@ -573,10 +600,9 @@ pub const Pattern = struct {
         comptime const P = pat(pattern);
         comptime const E = MatchError(P);
         comptime const M = MatchType(P);
-        comptime const T = if (M == void)
-            []const u8
-        else
-            meta.Tuple(.{ []const u8, M });
+        comptime const T =
+            if (M == void) []const u8
+            else meta.Tuple(&.{ []const u8, M });
 
         return struct {
             pub usingnamespace PatternBuilder(@This());
@@ -584,13 +610,14 @@ pub const Pattern = struct {
             pub fn parse(p: *Parser) MatchReturn(E, T) {
                 const start = p.save();
                 const err = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(err))) try err else err;
+                const opt =
+                    if (comptime canError(@TypeOf(err))) try err
+                    else err;
                 if (opt) |sub| {
                     const c = p.buf[start.idx..p.pos()];
-                    if (comptime (M == void)) {
-                        return c;
-                    } else
-                        return .{ c, sub };
+                    return
+                        if (comptime (M == void)) c
+                        else T { .@"0" = c, .@"1" = sub };
                 }
                 return null;
             }
@@ -617,15 +644,21 @@ pub const Pattern = struct {
             pub usingnamespace PatternBuilder(@This());
 
             pub fn parse(p: *Parser) MatchReturn(E, T) {
-                const start = if (comptime (M != void)) {} else p.save();
+                const start =
+                    if (comptime (M != void)) {}
+                    else p.save();
                 const perr = P.parse(p);
-                const opt = if (comptime canError(@TypeOf(perr))) try perr else perr;
+                const opt =
+                    if (comptime canError(@TypeOf(perr))) try perr
+                    else perr;
                 if (opt) |sub| {
                     const ferr =
                         if (comptime (M != void)) f(sub)
                         else if (comptime (@typeInfo(@TypeOf(f)).Fn.args.len == 0)) f()
                         else f(p.buf[start.idx .. p.pos()]);
-                    const v = if (comptime canError(@TypeOf(ferr))) try ferr else ferr;
+                    const v =
+                        if (comptime canError(@TypeOf(ferr))) try ferr
+                        else ferr;
                     return v;
                 }
                 return null;
@@ -722,7 +755,7 @@ fn PatternBuilder(comptime Self_: type) type {
         pub fn matchLean(str: []const u8)
             MatchReturn(MatchError(Self), MatchType(Self))
         {
-            var p = Parser.init(str, &noalloc);
+            var p = Parser.init(str, &util.noalloc);
             return p.match(Self);
         }
     };
@@ -750,7 +783,9 @@ fn MatchError(comptime P: type) type {
 
 /// rewrap new capture result in option and optional error
 fn MatchReturn(comptime E: type, comptime T: type) type {
-    return comptime if (isError(E)) E!?T else ?T;
+    return comptime
+        if (isError(E)) E!?T
+        else ?T;
 }
 
 
@@ -848,126 +883,18 @@ pub const Parser = struct {
 };
 
 
-var noalloc = Allocator {
-    .allocFn = noAlloc,
-    .resizeFn = noResize,
-};
-
-fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) ![]u8 {
-    std.debug.panic("Unsanctioned allocation during pattern match", .{});
-}
-
-fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) !usize {
-    unreachable;
-}
-
-
 //----------------------------------------------------------------------------
 const testing = std.testing;
 const expectStr = testing.expectEqualStrings;
-const panic = std.debug.panic;
-
-pub fn expectOk(ev: anytype) StripError(@TypeOf(ev)) {
-    if (comptime !isError(@TypeOf(ev))) {
-        return ev;
-    } else if(ev) |v| {
-        return v;
-    } else |e|
-        panic("unexpected error.{}", .{ @errorName(e) });
-}
-
-// FIXME hacking around testing.expectEqual can't compare strings?!
-// FIXME should fix annoying expected type things too...
-pub fn expectEqual(exp: anytype, act: @TypeOf(exp)) void {
-    switch (@typeInfo(@TypeOf(act))) {
-        .Undefined, .Void, .Null => return,
-
-        .Bool, .Int, .Float, .ComptimeFloat, .ComptimeInt,
-        .EnumLiteral, .Enum, .Fn, .ErrorSet, .Type =>
-            if (act != exp)
-                panic("expected {}, found {}", .{ exp, act }),
-
-        .Pointer => |ptr| {
-            switch (ptr.size) {
-                .One, .Many, .C => if (act != exp)
-                    panic("expected {*}, found {*}", .{ exp, act }),
-                .Slice => {
-                    if (ptr.child == u8) {
-                        return expectStr(exp, act);
-                    } else
-                        return testing.expectEqualSlices(ptr.child, exp, act);
-                },
-            }
-        },
-
-        .Array => |ary| expectEqualSlices(ary.child, &exp, &act),
-
-        .Struct => |s| {
-            inline for (s.fields) |f|
-                expectEqual(@field(exp, f.name), @field(act, f.name));
-        },
-
-        .Union => |u| {
-            if (u.tag_type == null)
-                @compileError("Unable to compare untagged union values");
-
-            const Tag = @TagType(@TypeOf(exp));
-            expectEqual(@as(Tag, exp), @as(Tag, act));
-
-            inline for (std.meta.fields(@TypeOf(act))) |f| {
-                if (std.mem.eql(u8, f.name, @tagName(@as(Tag, act)))) {
-                    expectEqual(@field(exp, f.name), @field(act, f.name));
-                    return;
-                }
-            }
-            unreachable;
-        },
-
-        .Optional => {
-            if (exp) |expval| {
-                if (act) |actval| {
-                    expectEqual(expval, actval);
-                } else
-                    panic("expected {}, found null", .{ expval });
-            } else if (act) |actval|
-                panic("expected null, found {}", .{ actval });
-        },
-
-        else => std.debug.panic("unsupported type: {s}", act)
-    }
-}
-
-pub fn chkNoM(comptime pat: anytype, str: []const u8) void {
-    var p = Parser.init(str, testing.failing_allocator);
-    const m = expectOk(p.match(pat));
-    expectEqual(@as(@TypeOf(m), null), m);
-    expectEqual(@as(usize, 0), p.pos());
-}
-
-pub fn chkMatch(comptime pat: anytype, str: []const u8, n: usize) void {
-    var p = Parser.init(str, testing.failing_allocator);
-    const m = expectOk(p.match(pat));
-    expectEqual(@as(?void, {}), m);
-    expectEqual(n, p.pos());
-}
-
-pub fn chkCap(comptime pat: anytype, str: []const u8, n: usize)
-    MatchType(Pattern.pat(pat))
-{
-    var p = Parser.init(str, testing.allocator);
-    const m = expectOk(p.match(pat));
-    testing.expect(m != null);
-    expectEqual(n, p.pos());
-    return m.?;
-}
+const expectOk = util.expectOk;
+const expectEqual = util.expectEqual;
+const chkNoM = util.chkNoM;
+const chkMatch = util.chkMatch;
+const chkCap = util.chkCap;
+const chkError = util.chkError;
 
 fn injectError(p: *Parser) !?void {
     return error.Injected;
-}
-
-fn chkError(comptime pat: anytype, str: []const u8, err: anyerror) void {
-    var p = Parser.init(str, testing.allocator);
-    testing.expectError(err, p.match(pat));
 }
 
 fn parseU32Dec(s: []const u8) !u32 {
@@ -980,6 +907,7 @@ test "Pattern.str" {
     chkMatch(str(""), "", 0);
     chkMatch(str(""), "abc", 0);
 
+    chkNoM(str("a"), "");
     chkNoM(str("a"), "b");
     chkNoM(str("abc"), "ab");
 
@@ -1013,8 +941,9 @@ test "Pattern.set" {
     chkNoM(set(""), "");
     chkNoM(set(""), "a");
 
-    chkMatch(set("a"), "ab", 1);
+    chkNoM(set(""), "b");
     chkNoM(set("a"), "b");
+    chkMatch(set("a"), "ab", 1);
 
     const vowel = set("aeiou");
     chkNoM(vowel, "");
@@ -1034,12 +963,13 @@ test "Pattern.cls" {
     const p = Pattern.cls(G.even);
     const cs = p.toCharset();
 
-    var i: u8 = 1;
-    while (true) {
+    chkNoM(p, "");
+    chkNoM(cs, "");
+
+    comptime var i = 1;
+    inline while (i < 256) : (i += 2) {
         chkNoM(p, &.{i});
         chkNoM(cs, &.{i});
-        if (i >= 255) break;
-        i += 2;
     }
     chkMatch(p.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
     chkMatch(cs.rep(1, -1), "\x00\x02\x04\x08\x10\x20\x40\x80\xfe", 9);
@@ -1048,13 +978,16 @@ test "Pattern.cls" {
 test "Pattern.span" {
     const dig = Pattern.span('0', '9');
     chkNoM(dig, "");
+    chkNoM(dig, "!");
     chkNoM(dig, "fail");
     chkMatch(dig, "0abc", 1);
     chkMatch(dig, "9876", 1);
     chkMatch(dig, "42", 1);
 
     const cs = dig.toCharset();
-    chkNoM(cs, "fail");
+    chkNoM(cs, "");
+    chkNoM(cs, "()");
+    chkNoM(cs, "f");
     chkMatch(cs, "77", 1);
 }
 
@@ -1185,7 +1118,8 @@ test "Pattern.rep" {
 
     const ab_1 = rep(0, 1, Pattern.span('a', 'b'));
     chkMatch(ab_1, "", 0);
-    chkMatch(ab_1, "", 0);
+    chkMatch(ab_1, "A", 0);
+    chkMatch(ab_1, "z", 0);
     chkMatch(ab_1, "a", 1);
     chkMatch(ab_1, "b", 1);
     chkMatch(ab_1, "ab", 1);
@@ -1219,6 +1153,7 @@ test "Pattern.rep capture" {
     });
     chkNoM(nums, "");
     chkNoM(nums, ",");
+    chkNoM(nums, "z");
     {
         var act = chkCap(nums, "42", 2);
         testing.expectEqualSlices(u32, &[_]u32{ 42 }, act.items);
@@ -1231,6 +1166,47 @@ test "Pattern.rep capture" {
     }
 
     chkError(nums, "123,-123,456", error.Overflow);
+    chkError(nums, "123,1-23,456", error.InvalidCharacter);
+}
+
+test "Pattern.foldRep" {
+    const P = Pattern;
+    const Count = struct {
+        fn initCount() usize {
+            return 42;
+        }
+
+        fn foldCount(acc: *usize, c: void) void {
+            acc.* += 1;
+        }
+
+        const a = P.foldRep(0, -1, "a", 0, {}, foldCount);
+        const b = P.foldRep(1, -1, "b", initCount, {}, foldCount);
+        const cd = P.foldRep(
+            2, 4, "d", P.pat("c").grok(usize, initCount), {}, foldCount);
+
+        const initerr = P.foldRep(
+            0, -1, "xxx", P.pat(injectError), {}, P.foldVoid);
+    };
+
+    expectEqual(@as(usize, 0), chkCap(Count.a, "", 0));
+    expectEqual(@as(usize, 2), chkCap(Count.a, "aab", 2));
+    expectEqual(@as(usize, 3), chkCap(Count.a, "aaa", 3));
+
+    chkNoM(Count.b, "");
+    chkNoM(Count.b, "a");
+    expectEqual(@as(usize, 43), chkCap(Count.b, "b", 1));
+    expectEqual(@as(usize, 44), chkCap(Count.b, "bba", 2));
+
+    chkNoM(Count.cd, "d");
+    chkNoM(Count.cd, "cd");
+    expectEqual(@as(usize, 44), chkCap(Count.cd, "cdd", 3));
+    expectEqual(@as(usize, 44), chkCap(Count.cd, "cddc", 3));
+    expectEqual(@as(usize, 45), chkCap(Count.cd, "cddd", 4));
+    expectEqual(@as(usize, 46), chkCap(Count.cd, "cdddd", 5));
+    expectEqual(@as(usize, 46), chkCap(Count.cd, "cddddd", 5));
+
+    chkError(Count.initerr, "", error.Injected);
 }
 
 test "Pattern.seq" {
@@ -1245,6 +1221,9 @@ test "Pattern.seq" {
     }
     {
         const p = seq(.{ "12", "34", "56" });
+        chkNoM(p, "");
+        chkNoM(p, "12 ");
+        chkNoM(p, "1234z");
         chkNoM(p, "123467");
         chkMatch(p, "123456", 6);
     }
@@ -1255,8 +1234,11 @@ test "Pattern.seq" {
         chkNoM(p, "ba");
         chkMatch(p, "zb", 2);
     }
-
-    chkError(seq(.{ "abc", injectError, "xyz" }), "abc123xyz", error.Injected);
+    {
+        const p = seq(.{ "abc", injectError, "xyz" });
+        chkNoM(p, "");
+        chkError(p, "abc123xyz", error.Injected);
+    }
 }
 
 test "Pattern.seq capture" {
@@ -1264,10 +1246,18 @@ test "Pattern.seq capture" {
     const cap = Pattern.cap;
     {
         const p = seq(.{ "abc", cap("123"), "xyz" });
+        chkNoM(p, "xxx");
+        chkNoM(p, "abcxxx");
+        chkNoM(p, "abc123xxx");
         expectStr("123", chkCap(p, "abc123xyz ", 9));
     }
     {
         const p = seq(.{ cap("abc"), ",", cap("123"), ",", cap("xyz") });
+        chkNoM(p, "a");
+        chkNoM(p, "abc123xyz");
+        chkNoM(p, "abc,1");
+        chkNoM(p, "abc,123xyz");
+        chkNoM(p, "abc,123, ");
         const act = chkCap(p, "abc,123,xyz ", 11);
         expectStr("abc", act[0]);
         expectStr("123", act[1]);
@@ -1275,6 +1265,10 @@ test "Pattern.seq capture" {
     }
     {
         const p = seq(.{ cap("abc"), ",", cap("123"), ",", injectError });
+        chkNoM(p, "");
+        chkNoM(p, "abc.");
+        chkNoM(p, "abc,xxx");
+        chkNoM(p, "abc,123.");
         chkError(p, "abc,123,xyz", error.Injected);
     }
 }
@@ -1289,6 +1283,11 @@ test "Pattern.alt" {
         chkMatch(p, "xyz", 3);
         chkMatch(p, "abcxyz", 3);
         chkMatch(p, "abcabc", 3);
+    }
+    {
+        const p = alt(.{ "abc", injectError });
+        chkMatch(p, "abcd", 3);
+        chkError(p, "a", error.Injected);
     }
 }
 
@@ -1305,12 +1304,15 @@ test "alt charsets" {
 
 test "Pattern.pos" {
     const pat = Pattern.pat;
-    const pos = Pattern.pos;
     expectEqual(@as(usize, 0), chkCap(pat(0).pos(), "", 0));
-    expectEqual(@as(usize, 2), chkCap(pat(.{
+
+    const p = pat(.{
         pat("a").rep(0, -1).pos(),
         pat("b").rep(0, -1)
-    }), "aabb ", 4));
+    });
+    expectEqual(@as(usize, 0), chkCap(p, "", 0));
+    expectEqual(@as(usize, 1), chkCap(p, "ac", 1));
+    expectEqual(@as(usize, 2), chkCap(p, "aabb ", 4));
 }
 
 test "Pattern.cap" {
@@ -1323,13 +1325,49 @@ test "Pattern.cap" {
             span('x', 'z').rep(1, -1).cap(),
             span('a', 'c').rep(0, -1),
         });
+
+        const err = cap(injectError);
     };
 
     chkNoM(G.p, "");
+    chkNoM(G.p, "AXZ");
+    chkNoM(G.p, "{x}");
+    chkNoM(G.p, "bZ2");
+    chkNoM(G.p, "b|2");
     chkNoM(G.p, "aabb");
-    expectStr("x", chkCap(G.p, "x", 1));
+    expectStr("x", chkCap(G.p, "xZ", 1));
+    expectStr("x", chkCap(G.p, "x~", 1));
     expectStr("xyz", chkCap(G.p, "abcxyzabc", 9));
     expectStr("yy", chkCap(G.p, "aayyccxyz", 6));
+
+    chkError(G.err, "", error.Injected);
+}
+
+test "Pattern.cap nested" {
+    const G = struct {
+        usingnamespace Pattern;
+
+        const p = seq(.{
+            set("a").inv().rep(0, -1),
+            set("a").rep(1, -1).cap(),
+            set("a").inv().rep(0, -1),
+        }).cap();
+    };
+
+    chkNoM(G.p, "");
+    chkNoM(G.p, "xyzbbb");
+    {
+        const act = chkCap(G.p,"xaaax", 5);
+        expectEqual(@as(usize, 2), act.len);
+        expectStr("xaaax", act[0]);
+        expectStr("aaa", act[1]);
+    }
+    {
+        const act = chkCap(G.p,"aaxxaa", 4);
+        expectEqual(@as(usize, 2), act.len);
+        expectStr("aaxx", act[0]);
+        expectStr("aa", act[1]);
+    }
 }
 
 test "Pattern.grok" {
@@ -1346,10 +1384,14 @@ test "Pattern.grok" {
 
     chkNoM(G.p, "");
     chkNoM(G.p, "=");
+    chkNoM(G.p, "x");
+    chkNoM(G.p, "x=");
+    chkNoM(G.p, "x=a");
     expectEqual(@as(u32, 1), chkCap(G.p, "a=1 ", 3));
     expectEqual(@as(u32, 123), chkCap(G.p, "abc=123xyz", 7));
 
     chkError(G.p, "xyz=-42", error.Overflow);
+    chkError(G.p, "xyz=0-0", error.InvalidCharacter);
 }
 
 test "Pattern.grok noargs" {
@@ -1366,6 +1408,34 @@ test "Pattern.grok noargs" {
     expectEqual(true, chkCap(G.p, ".", 1));
 }
 
+test "Pattern.grok sub" {
+    const P = Pattern;
+    const Ass = struct {
+        name: []const u8,
+        val: u32,
+
+        fn grok(spec: anytype) @This() {
+            return .{
+                .name = spec[0],
+                .val = spec[1],
+            };
+        }
+
+        const p = P.seq(.{
+            P.span('a', 'z').rep(1, -1).cap(),
+            "=",
+            P.span('0', ':').rep(1, -1).grok(anyerror!u32, parseU32Dec),
+        }).grok(@This(), grok);
+    };
+
+    chkNoM(Ass.p, "");
+    chkNoM(Ass.p, "no");
+    chkNoM(Ass.p, "x=");
+    expectEqual(Ass{.name="abc", .val=42}, chkCap(Ass.p, "abc=42", 6));
+
+    chkError(Ass.p, "a=:5", error.InvalidCharacter);
+}
+
 test "blind greedy" {
     const G = struct {
         usingnamespace Pattern;
@@ -1380,10 +1450,10 @@ test "non-blind greedy" {
         usingnamespace Pattern;
 
         const lastdig = alt(.{
-            .{ 1, lastdigRef },
+            .{ 1, lastdigref },
             span('0', '9')
         });
-        const lastdigRef = ref(&@This(), "lastdig", void);
+        const lastdigref = ref(&@This(), "lastdig", void);
     };
 
     chkNoM(G.lastdig, "abcxyz");
@@ -1395,8 +1465,8 @@ test "non-blind non-greedy c comment grammar" {
         usingnamespace Pattern;
 
         const comment = cat("/*", close);
-        const close = alt(.{ "*/", .{ 1, closeRef }, });
-        const closeRef = ref(&@This(), "close", void);
+        const close = alt(.{ "*/", .{ 1, closeref }, });
+        const closeref = ref(&@This(), "close", void);
     };
 
     chkNoM(G.comment, "");
@@ -1443,6 +1513,7 @@ test "predication" {
     chkNoM(G.p, "int64");
     chkNoM(G.p, "float32");
     chkMatch(G.p, "in", 2);
+    chkMatch(G.p, "floof", 5);
     chkMatch(G.p, "floaty", 6);
     chkMatch(G.p, "intu ", 4);
     chkMatch(G.p, "uint123", 4);
@@ -1461,12 +1532,12 @@ test "even 0s even 1s" {
         // OO <- ’0’ EO / ’1’ OE
 
         // add enough manual refs to break cycles
-        const eeRef = ref(&@This(), "ee", void);
-        const ooRef = ref(&@This(), "oo", void);
+        const eeref = ref(&@This(), "ee", void);
+        const ooref = ref(&@This(), "oo", void);
 
         const ee = alt(.{ .{ "0", oe }, .{ "1", eo }, -1 });
-        const oe = alt(.{ .{ "0", eeRef }, .{ "1", ooRef } });
-        const eo = alt(.{ .{ "0", ooRef }, .{ "1", eeRef } });
+        const oe = alt(.{ .{ "0", eeref }, .{ "1", ooref } });
+        const eo = alt(.{ .{ "0", ooref }, .{ "1", eeref } });
         const oo = alt(.{ .{ "0", eo }, .{ "1", oe } });
     };
 
@@ -1478,6 +1549,6 @@ test "even 0s even 1s" {
     chkMatch(G.ee, "00", 2);
     chkMatch(G.ee, "11", 2);
     chkNoM(G.ee, "11z");
-    chkMatch(G.ee, "0101101101", 10);
+    chkMatch(G.ee, "0101001110101100", 16);
     chkNoM(G.ee, "0101100101");
 }

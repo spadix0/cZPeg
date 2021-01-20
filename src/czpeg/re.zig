@@ -4,6 +4,7 @@ const TypeInfo = std.builtin.TypeInfo;
 const Allocator = std.mem.Allocator;
 
 const czpeg = @import("../czpeg.zig");
+const util = @import("util.zig");
 const Parser = czpeg.Parser;
 const P = czpeg.Pattern;
 
@@ -133,7 +134,7 @@ const Preparse = struct {
     const findRule = struct {
         pub fn parse(p: *Parser) ?[]const u8 {
             while (true) {
-                _ = word0.toCharset().inv().rep(0, -1).parse(p);
+                _ = word0.inv().rep(0, -1).parse(p);
                 if (P.seq(.{ name.cap(), spc, "<-" }).parse(p)) |r|
                     return r;
                 if (word0.rep(1, -1).parse(p) == null)
@@ -152,7 +153,7 @@ const Preparse = struct {
         const n = count_rules.matchLean(re).?;
         var fields: [n]TypeInfo.StructField = undefined;
         var i = 0;
-        var p = Parser.init(re, &noalloc);
+        var p = Parser.init(re, &util.noalloc);
         @setEvalBranchQuota(1<<16);
         while (findRule.parse(&p)) |r| {
             fields[i] = .{
@@ -192,7 +193,9 @@ const cls = P.seq(.{
 }).grok(type, genCls);
 
 fn genCls(comptime s: anytype) ?type {
-    return if (s[0] == null) s[1] else s[1].toCharset().inv();
+    return
+        if (s[0] == null) s[1]
+        else s[1].inv();
 }
 
 fn foldAlt(comptime acc: *type, comptime pat: type) void {
@@ -240,7 +243,7 @@ const word0 = R.alt(.{ "_", R.span('A', 'Z'), R.span('a', 'z') });
 const word = R.alt(.{ word0, R.span('0', '9') });
 
 fn invCls(comptime f: fn(u8)bool) type {
-    return R.cls(asc.isAlpha).toCharset().inv();
+    return R.cls(asc.isAlpha).inv();
 }
 
 const classes = .{
@@ -268,36 +271,23 @@ const classes = .{
 };
 
 
-// FIXME can't reuse from czpeg...
-var noalloc = Allocator {
-    .allocFn = noAlloc,
-    .resizeFn = noResize,
-};
-
-fn noAlloc(a: *Allocator, b: usize, c: u29, d: u29, e: usize) Allocator.Error![]u8 {
-    std.debug.panic("Parser attempted to alloc during compile", .{});
-}
-
-fn noResize(a: *Allocator, b: []u8, c: u29, d: usize, e: u29, f: usize) Allocator.Error!usize {
-    unreachable;
-}
-
-
 //----------------------------------------------------------------------------
 const testing = std.testing;
 const expect = testing.expect;
 const expectStr = testing.expectEqualStrings;
-const expectEqual = czpeg.expectEqual;
-const chkNoM = czpeg.chkNoM;
-const chkMatch = czpeg.chkMatch;
-const chkCap = czpeg.chkCap;
+const expectOk = util.expectOk;
+const expectEqual = util.expectEqual;
+const chkNoM = util.chkNoM;
+const chkMatch = util.chkMatch;
+const chkCap = util.chkCap;
+const chkError = util.chkError;
 
 // checkers that force comptime parser for testing patterns on R
 // (works without sometimes, but not always)
 
 pub fn ctChkNoM(comptime pat: anytype, comptime s: []const u8) void {
-    comptime var p = Parser.init(s, &noalloc);
-    comptime const m = czpeg.expectOk(p.match(pat));
+    comptime var p = Parser.init(s, &util.noalloc);
+    comptime const m = expectOk(p.match(pat));
     if (comptime (m != null)) {
         @compileLog("length", comptime p.pos(), "match", m);
         @compileError("expected no match, found match");
@@ -311,8 +301,8 @@ pub fn ctChkNoM(comptime pat: anytype, comptime s: []const u8) void {
 pub fn ctChkCap(comptime pat: anytype, comptime s: []const u8, comptime n: usize)
     czpeg.MatchType(P.pat(pat))
 {
-    comptime var p = Parser.init(s, &noalloc);
-    comptime const m = czpeg.expectOk(p.match(pat));
+    comptime var p = Parser.init(s, &util.noalloc);
+    comptime const m = expectOk(p.match(pat));
     if (comptime (m == null))
         @compileError("expected match, found null ("
                       ++ @typeName(@TypeOf(m)) ++ ")");
@@ -332,33 +322,34 @@ pub fn ctChkMatch(comptime pat: anytype, comptime s: []const u8, comptime n: usi
 
 
 test "spc" {
-    ctChkMatch(spc, "", 0);
-    ctChkMatch(spc, "a", 0);
-    ctChkMatch(spc, " ", 1);
-    ctChkMatch(spc, " \t\n\r :O", 5);
+    chkMatch(spc, "", 0);
+    chkMatch(spc, "a", 0);
+    chkMatch(spc, " ", 1);
+    chkMatch(spc, " \t\n\r :O", 5);
 }
 
 test "name" {
-    ctChkNoM(name, "");
-    ctChkNoM(name, "42");
-    ctChkMatch(name, "a ", 1);
-    ctChkMatch(name, "_priv", 5);
-    ctChkMatch(name, "yomama8yodog*", 12);
-    ctChkMatch(name, "a_b_", 4);
+    chkNoM(name, "");
+    chkNoM(name, "42");
+    chkMatch(name, "a ", 1);
+    chkMatch(name, "_priv", 5);
+    chkMatch(name, "yomama8yodog*", 12);
+    chkMatch(name, "a_b_", 4);
 }
 
 test "num" {
-    ctChkNoM(num, "");
-    ctChkNoM(num, "a");
-    expectEqual(@as(u32, 0), ctChkCap(num, "0", 1));
-    expectEqual(@as(u32, 42), ctChkCap(num, "42", 2));
+    chkNoM(num, "");
+    chkNoM(num, "a");
+    expectEqual(@as(u32, 0), chkCap(num, "0", 1));
+    expectEqual(@as(u32, 42), chkCap(num, "42", 2));
+    chkError(num, "9999999999", error.Overflow);
 }
 
 test "str" {
-    ctChkNoM(str, "");
-    ctChkNoM(str, "a");
-    expectEqual(@as([]const u8, "a"), ctChkCap(str, "'a'b", 3));
-    expectEqual(@as([]const u8, "yomama"), ctChkCap(str, "\"yomama\"", 8));
+    chkNoM(str, "");
+    chkNoM(str, "a");
+    expectEqual(@as([]const u8, "a"), chkCap(str, "'a'b", 3));
+    expectEqual(@as([]const u8, "yomama"), chkCap(str, "\"yomama\"", 8));
 }
 
 test "def" {
@@ -620,6 +611,7 @@ test "rule" {
     chkNoM(p, "");
     chkNoM(p, "ab");
     chkMatch(p, "abab", 4);
+    chkMatch(p, "aaababbba", 8);
 }
 
 // re grammar
